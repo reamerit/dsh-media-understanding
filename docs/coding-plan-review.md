@@ -214,7 +214,9 @@ execute, presentCall, presentResult, isConcurrencySafe, timeoutMs, projectConten
 @deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app, dshmarket, mattpocock-skills-dsh, dsh-better-sidebar
 ```
 
-**`dsh-context`、`dsh-knowledge` 在本机（profile 与 .pnpm 树）都不存在**，只有 `dsh-better-sidebar@0.26.0` 是本机唯一第三方插件。§5 中"`dsh-knowledge` 就这么写的（手写 JSON Schema）"这一论据**无法在本机核实**。
+**`dsh-context`、`dsh-knowledge` 在本机（profile 与 .pnpm 树）都不存在**，只有 `dsh-better-sidebar@0.26.0` 是 profile 里唯一第三方插件。§5 中"`dsh-knowledge` 就这么写的（手写 JSON Schema）"这一论据**无法在本机核实**。
+
+> ✅ **后续已补**（2026-10-16）：本机另有一个**在产的宿主侧第三方插件**范本 —— `C:\workspace\github\dsh-mcp-skill-panel`（0.7.2，已适配 DSH 0.2.0-rc.2，30 个 src 文件）。它比 §2.4 下面这些 `.pnpm` 内官方包更贴近本插件要写的东西：宿主半区、注册工具（`defineTool` + `ctx.tools.register`）、自带 bundle patch、独立打包与本地类型解析。**其结论已抄进计划 §3.1**（含 `external` 铁律、`inject` 策略修正、模块同一性风险）。下面这张表仍是"官方实现范本"的入口。
 
 **替代参考实现（都在 .pnpm 里，可直接读）**：
 
@@ -562,5 +564,6 @@ py -0p →  -V:3.15   ...\Python315\python.exe
 |---|---|---|
 | 长音频执行模型 | **走 `jobs` 后台作业**：`transcribe_audio` 起 `kind: 'transcribe'` 作业后立即返回 `jobId`，正文由 `job_output` 读取；`video_frames` 保持同步（抽帧秒级，且帧图需在 `execute` 内落附件服务） | 计划 §5.1（契约）、§6（输出）、§7（配置）、§8 R2c |
 | vision 真图 | **已实测通过**：`read_image` 把含随机码的 PNG 作为工具结果投给默认路由，模型读出 `FFEJD9` 与未入上下文的答案一致 ⇒ 工具结果里的 image 块被上游接受并理解，R2b 的过度声明有真实能力兜底 | 计划 §10.4（方法+证据） |
+| 宿主侧范本 | **已找到**：`C:\workspace\github\dsh-mcp-skill-panel` ⇒ B2 关闭。其**打包 `external` 铁律**纠正了一条会真出事的地方：把 `@deepseek-ai/*` 内联进 bundle 会得到第二份模块副本 → 重复 Symbol → 工具调度崩溃 | 计划 §3.1、§11.3 B2 |
 
 > 这两项都已闭环，不再是开工前的待决项；§9.6 的 D4/D6/D7 也不构成阻断（见计划 §11.3）。

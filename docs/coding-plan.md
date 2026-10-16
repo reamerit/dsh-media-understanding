@@ -244,7 +244,7 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 
 ## 3. 包结构
 
-参考本机已安装的真实插件。⚠️ **勘误**：本机**没有** `dsh-context`、`dsh-knowledge`；唯一第三方插件是 `dsh-better-sidebar@0.26.0`，另有 `.pnpm` 内的官方实现可作范本（`dsh-tool-fs` 的 `read_image`、`dsh-tool-fs-search` 的 spawn、`dsh-experimental-speech-to-text-sensevoice` 的长驻媒体 worker）。
+参考本机已安装的真实插件。⚠️ **勘误**：本机**没有** `dsh-context`、`dsh-knowledge`。宿主侧范本用 **`C:\workspace\github\dsh-mcp-skill-panel`**（在产第三方插件，见 §3.1），清单形状参考 `dsh-better-sidebar@0.26.0`，实现范本在 `.pnpm` 内（`dsh-tool-fs` 的 `read_image`、`dsh-tool-fs-search` 的 spawn、`dsh-experimental-speech-to-text-sensevoice` 的长驻媒体 worker）。
 
 ```jsonc
 // package.json  ⚠️ 勘误：版本号按本机运行时 0.2.0-rc.2 改；兼容性字段名按真实清单形状改
@@ -292,7 +292,8 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 
 | 文件 | 职责 |
 |---|---|
-| `src/index.ts` | 插件入口：`export const name`、⚠️ **勘误**：`inject` 只写真正必需的（如 `['tools']`），其余用 `ctx.inject(['llm','attachments','subprocess'], …)` 可选注入（照抄 `dsh-tool-fs/lib/index.js:1176-1206`）；`apply(ctx)` 注册两个工具、`Config` schema |
+| `src/index.ts` | 插件入口：`export const name`、`inject`（策略见 §3.1）、`apply(ctx)` 注册工具、`Config` schema |
+| `src/globals.d.ts` | `import type {} from '@deepseek-ai/dsh-tools'` 这类**空类型导入**，触发官方包的 `declare module '@deepseek-ai/cordis'` 增强，让 `ctx.tools`/`ctx.jobs`/`ctx.attachments`/`ctx.subprocess` 拿到精确类型——**无运行时依赖**（范本：`dsh-mcp-skill-panel/src/globals.d.ts`） |
 | `src/tools/transcribe.ts` | `transcribe_audio` 工具定义（参数/输出契约/降级） |
 | `src/tools/frames.ts` | `video_frames` 工具定义（含 C2 能力门控与附件持久化） |
 | `src/media/ffmpeg.ts` | `ctx.subprocess` 封装：`probe()`、`extractAudio()`、`sampleFrames()`（含 C4a 时间戳解析） |
@@ -301,6 +302,25 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 | `src/media/errors.ts` | 错误分类：缺 ffmpeg / 缺 python / 缺依赖 / **缺 MSVC 运行时（`0xC0000005` 无输出退出）** / **内存不足（`mkl_malloc`）** / 缺音轨 / 无场景变化 |
 | `src/workers/transcribe.py` | faster-whisper worker（stdlib + faster_whisper，无第三方胶水） |
 | `test/*.test.mjs` | 契约测试（参数校验、render 纯函数性、降级分支、时间戳解析） |
+
+### 3.1 构建与本地开发（照本机范本 `C:\workspace\github\dsh-mcp-skill-panel`）
+
+B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`dsh-mcp-skill-panel` 0.7.2，已适配 DSH 0.2.0-rc.2，30 个 src 文件），以下全部照抄其做法：
+
+| 事项 | 结论 | 范本出处 |
+|---|---|---|
+| **打包铁律** | `tsdown` 必须 `external: [/^@deepseek-ai\//, /^node:/]`——**绝不把 `@deepseek-ai/*` 内联进 bundle**，否则会得到**第二份模块副本 → 重复 `Symbol` → 工具调度崩溃**（范本注释点名的 `TOOL_RUNTIME_SCHEDULER` 事故）。运行时靠宿主 peer 拦截解析到同一份实例 | `tsdown.config.ts:23` |
+| 构建配置 | `format: ['esm']`、`platform: 'node'`、`target: 'node22'`、`dts: false`、`clean: true`；多入口时**必须显式 `outputOptions.entryFileNames`**（两个入口 basename 都是 `index` 会互相覆盖） | `tsdown.config.ts:16-45` |
+| 类型声明 | 由 `tsc -p tsconfig.dts.json` 生成到 `lib/types/`（`package.json` 的 `types` 指向它），**不用** tsdown 的 dts 管线 | `tsdown.config.ts:11-14` |
+| `tsconfig.json` | `moduleResolution: 'bundler'` + `paths` 把用到的 DSH 包直接映射到 `node_modules/@deepseek-ai/<pkg>/lib/types/index.d.ts`（只列真正 import 的那几个，不必全量） | `tsconfig.json:15-24` |
+| **本地类型来源** | 用脚本把宿主闭包 **junction** 进 `<repo>/node_modules/@deepseek-ai`（Windows 用 `mklink /J`，无需管理员） | `scripts/setup-dsh-deps.mjs` |
+| ⚠️ 本机差异 | 范本默认源头是 `~/.dsh/profiles/web/node_modules/@deepseek-ai`（作者机器上 241 项）。**本机那目录只有 2 项**（`cosmokit`/`schemastery`）——本机的 DSH 是**从 dev checkout 跑的**（`~/.dsh/bin/dsh.cmd` → `C:\Users\Administrator\deepseek-harness\node_modules\@deepseek-ai\dsh\lib\bin.js`），闭包在 `deepseek-harness\node_modules\.pnpm\@deepseek-ai+<pkg>@0.2.0-rc.2*\node_modules\@deepseek-ai\<pkg>`。⇒ **junction 脚本的源头必须用 `DSH_HOST_SCOPE` 指到 harness 的 `.pnpm` 闭包**（或改用 npm devDependencies 精确钉 `0.2.0-rc.2`，`dsh-better-sidebar` 就是这么做的，更可移植） | 实测 |
+| ⚠️ 模块同一性风险 | 仓库里的 dev `node_modules/@deepseek-ai/*` 会在**运行时抢先被解析**，与宿主那份成为两个实例。范本的对策是把插件**放到仓库树外**部署，再 junction 进 profile；`deploy-link.mjs` 会打印回滚命令 | `scripts/deploy-link.mjs:5-20` |
+| `inject` 策略（修正 §3 原表述） | 两边都有先例：范本用**静态全量** `inject = ['fs','skills','tools',…]`（这些服务都在 base bundle 里，必然存在），只把**真正可选**的能力（`webServer`）留给 `ctx.inject([...], …)`，并在 `peerDependenciesMeta` 里标 `optional`。**规则**：核心服务写静态 `inject`，可选能力走 `ctx.inject` + `optional` peer | `src/index.ts:163,926`、`package.json:56-63` |
+| `manifestVersion` | **可选**：范本省略，`dsh-better-sidebar` 写了 `1`。有 client 半区时建议写 | `dsh-mcp-skill-panel/package.json:24-35` |
+| 兼容性写法 | 范本用**有上界**的 `">=0.1.5-rc.0 <0.3.0-0"`（社区市集插件普遍如此）。本插件按已定口径用 `>=0.2.0-rc.2`（无上界）——**这是有意的选择**，日后要挡破坏性大版本时改成 `>=0.2.0-rc.2 <0.3.0-0` | `dsh-mcp-skill-panel/package.json:48-55` |
+| `package.json` 其他字段 | `files: ["lib","cordis.patch.yml"]`、`exports` 里额外导出 `./cordis.patch.yml` 与 `./package.json`、`engines.node >= 22.19` | 同上 `:8-23,93-95` |
+| 范本还有 | `scripts/verify.mjs`（产物自检）、多个 `selftest:*.mjs`（把纯逻辑拆成独立入口以便脱离宿主自测）、`.github/` CI。值得照搬"纯逻辑拆独立入口 + selftest"这条 | `scripts/` |
 
 ---
 
@@ -597,7 +617,7 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 | `base` | 0.9s | 2.8s | **4.6×** | 快速档 |
 | **`small`** | 2.0s | 7.9s | **1.7×** | ✅ **推荐默认**（精度/速度平衡） |
 | `medium` | 37.5s（含下载） | 21.7s | **0.6×** | ⚠️ **慢于实时**，1 小时录音需 ~1.7 小时，仅按需使用 |
-| `large-v3` | — | — | — | 未拉取；CPU 上预计更慢，不建议 |
+| `large-v3` | — | — | — | **未拉取**（约 3.1 GB / 1550M 参数）。CPU 上预计远慢于实时（依据 `medium` 已 0.6×），故不建议作默认；**该行为估算，不是实测** |
 
 **待办**：`large-v3` 未拉取（CPU-only，预计慢于实时；如需按需 `transcribe` 首次下载）；GPU 推理不可行（无驱动/设备）。
 
@@ -635,7 +655,7 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 | vision 通路 | ✅ 已实测 | 工具结果里的 image 块被默认路由正确理解（§10.4，随机码真图 `FFEJD9` 读出并核对通过） |
 | 兼容性口径 | ✅ | `>=0.2.0-rc.2`（见 §3 注：必须带点；`cordis` 不参与判定） |
 | 测试素材 | ✅ | `%USERPROFILE%\.dsh\media-selftest\`（真实语音 13s + 合成色块视频 + 16k WAV） |
-| 本机范本 | ✅ | `dsh-better-sidebar@0.26.0` 的 `package.json` 可直接照抄清单形状；`.pnpm` 内有 `dsh-tool-fs` / `dsh-tool-fs-search` / `dsh-experimental-speech-to-text-sensevoice` 作实现范本 |
+| 本机范本 | ✅ **两个层次都有**：**宿主侧第三方插件**范本 = `C:\workspace\github\dsh-mcp-skill-panel`（在产，0.7.2，已适配 0.2.0-rc.2；构建/类型/模块同一性照它，见 §3.1）；**清单形状**参考 = `dsh-better-sidebar@0.26.0`；**实现范本** = `.pnpm` 内 `dsh-tool-fs`（`read_image`）、`dsh-tool-fs-search`（spawn）、`dsh-experimental-speech-to-text-sensevoice`（长驻 worker） |
 
 ### 11.2 🔨 还差什么（**要写的代码，目前一行都没有**）
 
@@ -664,18 +684,18 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 | # | 事项 | 性质 | 处置 |
 |---|---|---|---|
 | **B1** | ~~需再重启一次 `dsh web`~~ | 环境 | ✅ **已解决**：重启后 DSH 子进程里 `python` 已解析到 3.14.8。探针仍要实测 `import faster_whisper`，不认路径 |
-| **B2** | **本机没有现成的"宿主侧第三方插件"范本** | 工程 | 已澄清机制（peer 声明 + 宿主拦截，§11.1），可照 `dsh-better-sidebar` 的 `package.json` 形状起步；Phase 1 的 `media_probe` 就是用来一次性验证装载链路的，**建议先只做这一件事再写业务代码** |
+| **B2** | ~~本机没有现成的"宿主侧第三方插件"范本~~ | 工程 | ✅ **已解决**：本机有在产范本 **`C:\workspace\github\dsh-mcp-skill-panel`**（0.7.2，已适配 DSH 0.2.0-rc.2）。其清单/挂载/构建/类型解析/模块同一性对策已逐项抄进 **§3.1**，并纠正了 §3 原 `inject` 表述；Phase 1 的 `media_probe` 仍先只做装载链路验证 |
 | **B3** | ~~长音频 × 工具超时~~ | 设计 | ✅ **已决：走 `jobs` 后台任务**。`ctx.jobs.start(spec)` 起一个 `kind: 'transcribe'` 的后台作业，工具**立即**返回 `jobId`；模型用已挂载的 `job_output`/`job_list`/`job_kill` 读结果。契约见 §5.1，配置见 §7 |
 | **B4** | ~~vision 路由是"过度声明"，本机未实测~~ | 风险（R2b） | ✅ **已实测通过**（2026-10-16）：用 `read_image` 把一张含**随机码**的 PNG 作为**工具结果**投给默认路由 `dsh/coding-standard-local`，模型读出了 `FFEJD9`，与事先写入、从未进入模型上下文的答案完全一致 ⇒ 上游**确实接受并理解**工具结果里的 image 块，那条 `input: [text, image]` 声明有真实能力兜底。详见 §10.4 |
 | **B5** | `maxImagesPerMessage = 20` | 约束 | `maxFrames` 默认取 16 留余量；工具描述里提示模型按需调小 |
 | **B6** | ~~工作区不是 git 仓库~~ | 工程 | ✅ **已解决**：已 `git init`、身份设为维护者、并推送到 `reamerit/dsh-media-understanding`；提交前的署名扫描写入 `AGENTS.md` |
 | **B7** | 会话回放出图 | 实现细节 | 必须同时实现 `output.presentationMeta` + `presentResult`，只写 `presentResult` 在回放时拿不到 attachment |
-| **B8** | 无 GPU / `large-v3` 不可用 | 限制 | 已在文档写明；`device` 固定 `cpu` |
+| **B8** | 无 GPU；`large-v3` 未拉取 | 限制 | `large-v3` = OpenAI Whisper 家族最大的 checkpoint（约 **1550M** 参数，v3 起 mel 维度从 80 提到 **128**），转成 CTranslate2 格式后约 **3.1 GB**。本机只预置了 tiny/base/small/medium；`device` 固定 `cpu`。⚠️ **"CPU 上更慢"目前是估算而非实测**（依据：`medium` 实测已是 0.6× 实时，参数多 2 倍的 `large-v3` 只会更慢）。需要精确数字就拉下来实测（约 3.1 GB，HF 通道实测 ~700 MB/min ⇒ 5 分钟内） |
 
 ### 11.4 建议的开工顺序
 
 1. ~~`git init` + 首次提交~~ ✅ 已完成
-2. 骨架（package.json / tsconfig / cordis.patch.yml）+ **只注册 `media_probe`** → 装进 profile → 重启 `dsh web` → 新会话确认工具可见可调用
+2. 骨架：照 **§3.1** 把 `package.json` / `tsconfig.json` / `tsconfig.dts.json` / `tsdown.config.ts` / `cordis.patch.yml` / `src/globals.d.ts` 立起来（`external` 铁律 + `paths` + junction 脚本），**只注册 `media_probe`** → 装进 profile → 重启 `dsh web` → 新会话确认工具可见可调用，并**实测 dev `node_modules` 是否造成模块同一性问题**
 3. `transcribe_audio`：`jobs` 后台作业（§5.1）+ worker + 错误分类
 4. `video_frames`：抽帧 + 附件持久化（B4 已先行验证通过，可直接照 `read_image` 的既有通路实现）
 5. 横切：`jobs` 的取消与进度、`presentationMeta`/`presentResult`（B7）
