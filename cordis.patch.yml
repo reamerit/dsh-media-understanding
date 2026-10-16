@@ -1,0 +1,21 @@
+# 把本包挂成宿主半插件。
+#
+# `id` 只用于这份 patch 内部的引用；`name` 必须是包名，宿主按 peerDependencies
+# 的解析拦截把它路由到宿主自己那一份实现（避免第二份模块副本）。
+#
+# 默认值口径（见 docs/coding-plan.md §5.1.0 与 §7）：
+# - device: auto —— 有 NVIDIA 卡就用 CUDA，无卡自动落 CPU（绝不在无卡机器上报错）
+# - computeType: auto —— 按 device 取可用档（GPU int8_float32 / CPU int8）
+# - model: small —— 实测 GPU 25×、CPU 3.2× 实时，精度与 medium 同级
+# - maxFrames: 16 —— imageLimits.maxImagesPerMessage 默认 20，留余量
+- insert:
+    - id: media-understanding
+      name: dsh-media-understanding
+      config:
+        whisper:
+          model: small
+          device: auto
+          computeType: auto
+        frames:
+          threshold: 0.3
+          maxFrames: 16

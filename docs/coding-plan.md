@@ -32,6 +32,69 @@
 
 ---
 
+> ## ✅ 实施状态（2026-10-16）：Phase 1–5 已完成，本机端到端验证通过
+>
+> 插件已实现并**在真实 DSH 宿主里跑通**（`test/` 60 项全绿）。验收证据：
+>
+> | 能力 | 证据 |
+> |---|---|
+> | 装载闭环 | 工具在宿主进程里注册成功；`--dump-config` 出现 `media-understanding` 行，无装载错误 |
+> | `media_probe` | 实测 `device: cuda` / `computeType: int8_float32` / `reason: cuda-available` / `fasterWhisper.ready: true` / `problems: []` |
+> | `transcribe_audio` | 真实语音：作业 → `job_output` 读到带时间戳转录，设备 `cuda/int8_float32`（MLK 引用 12.9s 片段） |
+> | `video_frames` | `blocks.mp4` 抽到 2 帧真图（`timestampSource: exact`，4.0s/6.0s，与 §10.5 记录一致），**模型确实看到了图**并能描述内容 |
+> | **链接输入** | 直链 mp4：下载 → 抽帧 → 真图回传，模型正确描述画面（"树下洞穴"） |
+> | 无卡降级 | 设备解析两条路径都有断言（`test/device.test.mjs`），无卡路径是回归重点 |
+>
+> **实现期修正的三处（原计划写错/写漏，均已在代码里注明）**：
+>
+> 1. ★ **时间戳打印器必须用 `showinfo`，不是 `metadata=mode=print`**。本机 ffmpeg 6.0 实测
+>    `metadata=mode=print` **根本不输出 `pts_time`**（只有普通 `Metadata:` 行）⇒ 所有时间戳
+>    静默退化成按 fps 估算：fps 采样下看着对、场景采样下完全对不上。改用
+>    `showinfo`（每帧一行 `n: <序号> pts: … pts_time:<秒>`，与文件 1:1）后两种策略都拿到
+>    `timestampSource: exact`。**这是"看起来能用其实是错的"那类缺陷，原计划把它当成已验证结论。**
+> 2. **工具返回值必须逐字段 JSON 无损**。宿主校验器对整棵值做 `isJsonValue`，遇到任何
+>    `undefined` 属性就整体判 `invalid output "value is not lossless JSON"`，**且不报字段名**；
+>    而 `{...(cond ? { y } : {})}` 这种展开**不会省掉键**。已加 `src/pure/json.ts`
+>    的 `pruneUndefined`/`assertJsonSafe` 在返回边界统一裁剪，并有 7 项测试。
+> 3. **worker 脚本路径的约定必须唯一**。`workersDir()` 与脚本拼接各自拼一次 `workers`
+>    ⇒ `<pkg>/src/workers/workers/probe.py`，表现为"探针全空、设备静默落 CPU、像是没装依赖"。
+>    现在 `workersDir()` 返回 workers 目录本身、下游只拼文件名，并加**失败即报错**断言
+>    （`assertWorkerScript`）+ 布局契约测试。
+>
+> **新增需求（用户后续提出）**：输入除本地路径外**还支持 http(s) 链接**——直链走
+> ffmpeg、平台页面链接（B站/YouTube）走 **yt-dlp**（本机已 `pip install yt-dlp`，实测
+> 2026.08.19）。GUI 上传的附件天然可用：宿主把上传文件落到
+> `<DSH_HOME>\attachments\v1\files\<sha2>\<sha256>\<name>` 并**把该路径渲染进模型可见文本**，
+> 所以模型的 `file_path` 参数直接指向它，插件无需特殊处理。任务要求由**主模型**消化成具体
+> 工具调用，插件不引入 `task` 参数。
+>
+> ### Phase 4 实测补录（2026-10-16 第二轮）
+>
+> | 验收项 | 结果 |
+> |---|---|
+> | `timeoutMs` 依据 | `media_probe` 180s（只读+启动余量）、`transcribe_audio` **120s（只做前置校验+起作业）**、`video_frames` 600s（同步抽帧落附件）；**作业时长不受工具超时约束**（jobs 的收益） |
+> | `exec.signal` 全链路 | `execute` → 前置探流/下载 → 作业内 `spawn({ signal })`；会话中断与 `job_kill` 共用同一 `AbortController` |
+> | **取消语义** | 6 分钟音频起作业后立刻 `job_kill` → `transcribe-1 [transcribe] **killed** — …`，`[status: killed, cancelled; cancellation test]`。⚠️ **修正了一处缺陷**：原先取消会落成 `failed` + "unrecognised reason"，与真故障无法区分；现在优先看 abort 状态并报 `killed`，reason 也进终态 |
+> | **无孤儿进程** | 取消后 `python`/`ffmpeg` 残留进程数 **0**（`Get-Process` 实测），临时产物在 `finally` 清理 |
+> | 长音频不阻塞 | 360s 音频在 CPU 上跑完（28 段、时间轴到 `05:59.7`、`completed`、0 残留）；工具调用本身**立即返回** |
+> | 错误矩阵 | 无音轨→`not-started`+`no-audio-track`；文件不存在→抛错带路径；`ftp://`→`not-started`+`unsupported-url`；死链→`download-failed`；无场景变化→`text-only`+`no-scene-change`；模型不支持图片→`text-only`+`model-lacks-image-input` |
+> | `isConcurrencySafe: true` | 三个工具都只读/各自独立临时目录（`mkdtemp`），作业各自持 `jobId` |
+> | `presentCall` | 转录工具如实告诉用户"这是提交后台作业，正文用 `job_output` 取"；抽帧工具带策略与帧数 |
+> | render 可回归 | `output.render` 抽到 `src/pure/render.ts`（零宿主依赖），`test/render.test.mjs` 8 项断言——**render 是模型唯一能看到的一面**，之前完全没测到，也正是本轮两个缺陷的所在 |
+>
+> ⚠️ **又一处计划外缺陷（本轮修掉）**：`transcribe_audio` 在"无音轨/输入不可解析"分支返回了
+> **自相矛盾**的 canonical 值——`status: 'running'` 配空 `jobId`，且 `render` 把它渲成
+> `job  (model small, …)`（空 id、双空格）。更糟的是结构化字段只存在于 canonical 值里，
+> **模型看不到**，于是它把 `reason` 猜成了 `note` 的内容。现在：`status` 增 `not-started`，
+> `render` 明确输出 `status | jobId | model | device | source | reason` 事实行。
+>
+> **交付物**：`src/index.ts`（插件入口 + Config）、`src/tools/{probe,transcribe,frames}.ts`、
+> `src/media/{exec,ffmpeg,whisper,download,input}.ts`、`src/pure/{device,errors,json,resolve-input,timestamps}.ts`、
+> `src/workers/{probe,transcribe}.py`、`test/`（60 项）、`scripts/{setup-dsh-deps,build,deploy,check-encoding}.mjs`。
+> **未提交**：按工作区 `AGENTS.md` 规则，所有改动停在未提交状态，等维护者决定。
+
+---
+
 ## 1. 勘察结论：必须先修正的 4 个前提
 
 原方案的整体思路（音频→转录文本、视频→帧图+转录，交给主模型融合）成立。但以下 4 点按原方案写会直接失败：
@@ -151,13 +214,43 @@ const err = handle.collected.stderr?.readFrom(0)   // { text, nextOffset, lossy,
 
 **(a) 时间戳**：原方案 `-vf "select='gt(scene,0.3)',showinfo"` + `-vsync vfr`，然后 `timestamp: 0 // 从 showinfo 解析`。这条命令**不会**把帧时间写进能解析的输出（`showinfo` 打到 stderr，且 `-vsync vfr` 下帧号≠时间），结果就是所有帧时间戳都是 0 —— 时间线对齐直接失效。
 
+> ## ★★ 勘误（2026-10-16，实施期实测推翻本节原结论）★★
+>
+> **本节原先写"改用 `metadata=mode=print`，实测已通过"，这个结论是错的。** 实施时按它写，
+> 结果是**所有时间戳静默退化成按帧率估算**——因为在**本机 ffmpeg 6.0** 上
+> `metadata=mode=print` **根本不打印 `pts_time`**（只打印普通的 `Metadata:` 行）。
+> 这个缺陷极隐蔽：`fps` 采样下估算值恰好正确，`scene` 采样下则完全对不上，而且没有任何报错。
+>
+> **正确做法：用 `showinfo`。** 它对**每个被输出的帧**打一行，含帧序号与秒级时间：
+>
+> ```
+> -vf "select='gt(scene,TH)',showinfo,scale='min(W,iw)':-2" -fps_mode vfr -frames:v N -q:v 3 out_%04d.jpg
+> ```
+>
+> 实测输出（本机 ffmpeg 6.0，10s/1fps 采样）：
+>
+> ```
+> [Parsed_showinfo_1 @ 0000022f24787b80] n:   0 pts:      0 pts_time:0 duration: 1 duration_time:1 …
+> [Parsed_showinfo_1 @ 0000022f24787b80] n:   1 pts:      1 pts_time:1 duration: 1 duration_time:1 …
+> → 文件 f_0001.jpg ↔ 0.0s，f_0002.jpg ↔ 1.0s（与输出文件严格 1:1）
+> ```
+>
+> 解析正则按**优先 showinfo 行**设计（`/\bn:\s*\d+\s+pts:\s*-?\d+\s+pts_time:\s*(-?\d+(?:\.\d+)?)/`），
+> 并保留裸 `pts_time` 作为兜底，同时把命中来源记为 `parsedFrom: 'showinfo' | 'pts_time' | 'none'`
+> 便于现场判断是谁在提供时间戳。实现见 `src/pure/timestamps.ts`、命令构造见 `src/media/ffmpeg.ts`；
+> 回归测试见 `test/timestamps.test.mjs`。
+>
+> 以下原文保留作**历史记录**（其余关于 `-vsync` 不可信、1:1 顺序对应、正则方向的判断**仍然成立**，
+> 只是打印器换成了 `showinfo`）：
+
 改用 `metadata=mode=print` 把选择帧的 `pts_time` 打到 stderr 再解析：
 
 ```
 -vf "select='gt(scene,TH)',metadata=mode=print" -fps_mode vfr -frames:v N -q:v 3 out_%04d.jpg
 ```
 
-**实测已通过**（原机器 ffmpeg 9.0.2；⚠️ 当前机器实装 **ffmpeg 6.0**，同一命令与结论**均已复现通过**），两个必须注意的点：
+**~~实测已通过~~**（⚠️ **已被上方勘误推翻**：`metadata=mode=print` 在本机 ffmpeg 6.0 上不输出
+`pts_time`；原机器 ffmpeg 9.0.2 的记录亦未复现成功），两个必须注意的点：
 
 1. **`-vsync` 不可信**（原机器 ffmpeg 9 已移除，报 `Unrecognized option 'vsync'`；当前 6.0 尚存但已废弃）→ 必须用 **`-fps_mode vfr`**（或 `passthrough`，两者实测都可用）。`-fps_mode` 自 ffmpeg **5.1** 引入，因此该写法在 6.x/7.x/9.x 上通用 —— "按 9.x 写"的说法应改为"按 **5.1+** 写"。
 2. **`select` + `metadata` 串联时，打印出的正是被选中的帧**，与输出文件 **1:1 顺序对应** —— 无需再用帧号/帧率反推。step 只需按顺序把第 i 个 `pts_time` 配给第 i 个 `NNNN.jpg`。
@@ -372,7 +465,7 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 2. **能力门控（C2）**：⚠️ 勘误：查 **`ctx.llm.resolveModelInfo(provider, model)`**（`provider`/`model` 取自 `exec.agent?.session.requestHeader()?.config ?? exec.agent?.options`）；`inputModalities` 不含 `image` → `mode: 'text-only'`，帧只落临时文件并给路径+时间戳，`reason: 'model-lacks-image-input'`，**绝不**产出 image 块。
 3. **附件持久化（C1）**：读 `ctx.attachments.imageLimits`，先按 `maxImageDimension` / `maxImageBytes` 决定是否让 ffmpeg 直接输出合适尺寸（`scale='min(1280,iw)':-2` + `-q:v 3`），再 `saveImages()` 批量持久化，拿 `ImageAttachmentRef[]`。
 4. **render（纯函数）**：`frames.flatMap(f => [{type:'text', text:`[${f.timestampSec}s]`}, {type:'image', attachment: f.attachment}])`；`presentResult` 提供同构 `GenericResultView`，保证**会话回放**（UI 重放时不重新执行 execute）也能出图。
-5. **时间戳（C4a）**：`metadata=mode=print` → 解析 stderr spill；解析不到则按帧号估算并如实标 `timestampSource: 'estimated'`。
+5. **时间戳（C4a）**：**用 `showinfo`**（⚠️ 实施期修正：原写的 `metadata=mode=print` 在 ffmpeg 6.0 上不输出 `pts_time`，见 §C4a 勘误）→ 解析 stderr spill；解析不到则按帧号估算并如实标 `timestampSource: 'estimated'`。
 6. 清理：临时帧文件在 `finally` 里删除；spill 文件由 subprocess 层管理。
 
 **验收**：在默认路由（⚠️ 勘误：`dsh/coding-standard-local`，已声明 vision）下，一次调用返回 N 张**真图**且每张带正确时间戳（人工对照视频抽查 2~3 帧），模型能据此回答"第 12 秒屏幕上的字是什么"；用测试注入"未声明 image"的模型信息时，工具返回 `text-only` 且**后续对话不报 `UNSUPPORTED_CONTENT`**；纯色视频返回 `frames: []` 且 `reason: 'no-scene-change'`。
@@ -469,41 +562,51 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 ```ts
 // transcribe_audio —— 立即返回作业句柄，转写结果经 job_output 读取
 {
-  jobId: string                    // 如 'transcribe-1'
-  status: 'running'                // 起作业后必然是 running
+  jobId: string                    // 如 'transcribe-1'；status 为 not-started 时是空串
+  status: 'running' | 'not-started'  // running = 作业已起；not-started = 前置判定已给结论、没有作业可读
   backend: 'whisper-local'
   model: string                    // 实际使用的 whisper 规格
-  note: string                     // 提示模型用 job_output 取结果
-  reason?: 'no-audio-track'        // 前置探测已判定无音轨时，直接给结论、不起作业
+  device: string                   // 实际生效设备（cuda/cpu）；没走到设备解析时是 'n/a'
+  source: 'local' | 'url'          // 输入来自本地文件还是链接
+  note: string                     // 提示模型用 job_output 取结果（或说明为何没起作业）
+  reason?: string                  // 未起作业时给出结论：'no-audio-track' / 'unsupported-url' / 'download-failed'
 }
 
-// job_output 读到（并作为转写正文的正式形状）
-{
-  text: string
-  language: string
-  durationSec: number
-  segments: Array<{ start: number; end: number; text: string }>
-  backend: 'whisper-local'
-  truncated: boolean
-  reason?: 'no-audio-track'
-}
+// job_output 读到的**模型可见正文**（实现为带时间轴的可读文本，不是 JSON）
+# transcript (en, 12.9s, 1 segments, cuda/int8_float32)
+[00:00.7 → 00:12.7] I have a dream that one day this nation will rise up …
+source: <原路径或原始链接>
+// 超出 transcribe.maxSegments 时头里多一行 `# TRUNCATED: …`
 
 // video_frames
 {
   frames: Array<{
     index: number
     timestampSec: number
-    attachmentId?: string      // 仅在 mode:'images' 时给出
-    width: number
-    height: number
+    attachmentId?: string      // 仅在 mode:'images' 时给出（sha256:… 不透明引用）
+    mediaType?: string         // 同上：'image/jpeg'
+    bytes?: number             // 同上：编码后字节数（回放时用于重建引用）
+    width?: number
+    height?: number
     path?: string              // 仅在 mode:'text-only' 时给出（临时帧文件）
   }>
   strategy: 'scene' | 'fps'
   timestampSource: 'exact' | 'estimated'
   mode: 'images' | 'text-only'
-  reason?: 'model-lacks-image-input' | 'no-scene-change' | 'no-video-stream'
+  durationSec: number
+  reason?: 'model-lacks-image-input' | 'no-scene-change' | 'no-video-stream' | 'attachments-unavailable' | 'download-failed' | 'unsupported-url'
+  note?: string                // 降级时给模型的一句解释（例如"改用 strategy: fps"）
 }
 ```
+
+**模型可见的渲染形式**（`output.render` 的纯投影，见 `src/pure/render.ts`）：标题行 +
+一行事实（`mode: … | strategy: … | timestampSource: … | durationSec: …`，降级时再加 `reason:`），
+随后每帧 `[MM:SS.s]` + 内联图片；`text-only` 时改为列出帧文件路径。**只有在真有帧且时间戳为
+估算时才附"时间戳是估算"的提醒**——零帧时谈时间戳来源是无意义的。
+
+> ⚠️ **实施期修正**：原计划只写了 `attachmentId`/`path`/`width`/`height`，实际还需要
+> `mediaType` 与 `bytes`——因为 canonical 值要过 `output.schema`，而回放（会话重放）时
+> `render` 拿不到任何文件，只能靠这些字段把 `ImageAttachmentRef` 重建出来。
 
 ---
 
