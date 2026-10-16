@@ -332,18 +332,20 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 
 1. 工具契约：
    - 参数（`defineTool` 的 spec DSL，注册时会被 `parameterSchemaSpecToJsonSchema` 编译）：`file_path`（string, required）、`language`（string, 可选）、`translate_to_english`（boolean, 可选）、`backend`（enum: `whisper-local`）。
-   - 输出：`{ text, language, durationSec, segments: [{ start, end, text }], backend, truncated }`，`render` 输出带时间戳的纯文本。
-2. `extractAudio()`：非音频容器先经 ffmpeg 抽轨到 16k 单声道 WAV（放受管临时目录）。
-3. `src/workers/transcribe.py`：`WhisperModel(model, device='auto', compute_type='int8')` → `transcribe(audio, language=..., beam_size=5, vad_filter=True)` → 写 JSON 到 `--out`。
-4. `whisper.ts`：`resolveExecutable('python')` 探测 → 首次冷启动超时放宽 → 把 worker 的 stderr 中的下载进度转成 `presentCall` 的可见提示（用户等 3GB 下载时不能像卡死）。
-5. 错误分类（C4b）：python 缺失 / faster_whisper 未安装 / 模型下载失败 / 无音轨（返回 `text: ''` + `reason: 'no-audio-track'`）。
+   - 输出：**立即返回作业句柄** `{ jobId, status, backend, model, note, reason? }`（⚠️ B3 决策：走 jobs，契约见 §5.1/§6），转写正文经 `job_output` 读取，`render` 出带时间戳的纯文本。
+2. `extractAudio()`：非音频容器先经 ffmpeg 抽轨到 16k 单声道 WAV（`os.tmpdir()` + `mkdtempSync`，`finally` 清理）。
+3. `src/workers/transcribe.py`：`WhisperModel(model, device='cpu', compute_type='int8', local_files_only=…)` → `transcribe(audio, language=..., beam_size=5, vad_filter=True)` → 写 JSON 到 `--out`（⚠️ 默认 `cpu` 而非 `auto`；模型已预置，优先离线）。
+4. `whisper.ts`：解析 `whisper.pythonPath`，**实测 `import faster_whisper`** 判定可用（不认路径）；作业用 `ctx.jobs.start({ kind: 'transcribe', owner, outputLimitBytes, run })`，`run` 内 `ctx.subprocess` 跑抽轨 + worker，`job.append` 写进度与正文，`exec.signal` 全程透传。
+5. 错误分类（C4b，新增两个本机实测错误类）：python 缺失 / faster_whisper 未安装 / **缺 MSVC 运行时（子进程无输出退出、退出码 `0xC0000005`）** / **内存不足（`mkl_malloc`）** / 模型下载失败 / 无音轨（前置探测即返回 `reason: 'no-audio-track'`，**不起作业**）。
 
-**验收**：对一个真实 mp4（含语音）与一个纯音频 wav，分别得到非空 `text` 与合理的 `segments` 时间轴；对一个无音轨视频得到 `no-audio-track` 而非报错；中途取消能终止 python 进程。
+**验收**：对一个真实 mp4（含语音）与一个纯音频 wav，作业起得来、`job_output` 能读到非空 `text` 与合理的 `segments` 时间轴；**1 小时长音频下工具调用立即返回、不阻塞**，期间可用 `job_kill` 终止且无孤儿 ffmpeg/python；对一个无音轨视频得到 `no-audio-track` 而非报错。
 
 ### Phase 3 · `video_frames`（最高风险，C1+C2+C4a 全在这里）
 
+> ✅ **B4 已先行验证通过**（§10.4）：默认路由确实接受并理解工具结果里的 image 块，本阶段可以放心产出 image 块。工具保持**同步**执行（抽帧秒级，且帧图必须在 `execute` 内落到附件服务才能内联渲染）。
+
 1. 工具契约：
-   - 参数：`file_path`（required）、`threshold`（number, 默认 0.3，可配）、`max_frames`（number, 默认 20，可配）、`strategy`（enum: `scene` | `fps`，默认 `scene`）、`fps`（number，`strategy=fps` 时生效）。
+   - 参数：`file_path`（required）、`threshold`（number, 默认 0.3，可配）、`max_frames`（number, 默认 **16**，可配）、`strategy`（enum: `scene` | `fps`，默认 `scene`）、`fps`（number，`strategy=fps` 时生效）。
    - 输出（canonical，永远有值）：`{ frames: [{ index, timestampSec, attachmentId?, width, height, path? }], strategy, timestampSource: 'exact' | 'estimated', mode: 'images' | 'text-only', reason? }`
 2. **能力门控（C2）**：⚠️ 勘误：查 **`ctx.llm.resolveModelInfo(provider, model)`**（`provider`/`model` 取自 `exec.agent?.session.requestHeader()?.config ?? exec.agent?.options`）；`inputModalities` 不含 `image` → `mode: 'text-only'`，帧只落临时文件并给路径+时间戳，`reason: 'model-lacks-image-input'`，**绝不**产出 image 块。
 3. **附件持久化（C1）**：读 `ctx.attachments.imageLimits`，先按 `maxImageDimension` / `maxImageBytes` 决定是否让 ffmpeg 直接输出合适尺寸（`scale='min(1280,iw)':-2` + `-q:v 3`），再 `saveImages()` 批量持久化，拿 `ImageAttachmentRef[]`。
@@ -356,10 +358,10 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 ### Phase 4 · 统一横切：错误、超时、取消、可观测
 
 1. 错误语义遵循 DSH 契约：**基础设施故障 throw**（ffmpeg 缺失、文件不存在），**业务非理想结果返回 canonical 值**（无音轨、无场景变化、模型不支持图片）。
-2. `defineTool` 的 `timeoutMs` 按工具性质设定并在 README 写明依据（转录需覆盖模型下载 + 时长；抽帧相对短）。
-3. `exec.signal` 全链路透传到 `ctx.subprocess.spawn({ signal })`，`finally` 清理临时产物；确认取消后无孤儿 ffmpeg/python。
-4. `isConcurrencySafe`：只读 + 独立临时目录 → 可声明 `true`（需确认不与其他调用的临时目录命名冲突）。
-5. `presentCall`：给长任务（转录、抽帧）一个如实的进行中卡片。
+2. `defineTool` 的 `timeoutMs` 按工具性质设定并在 README 写明依据：`transcribe_audio` 只做前置校验 + 起作业 ⇒ **短**（几秒）；`video_frames` 同步抽帧 ⇒ 中等（分钟级）。作业本身的时长不受工具超时约束（B3 决策的收益）。
+3. `exec.signal` 全链路透传到 `ctx.subprocess.spawn({ signal })`，`finally` 清理临时产物；确认取消后无孤儿 ffmpeg/python——**作业路径同样要验**（取消会话 → `job_kill` 两条路径）。
+4. `isConcurrencySafe`：只读 + 独立临时目录（且作业各自持 `jobId`）→ 可声明 `true`（需确认临时目录命名不冲突）。
+5. `presentCall`：起作业时给一张如实的"已提交后台"卡片；`video_frames` 给"抽帧中"卡片。
 
 **验收**：逐条执行 §8 错误矩阵，每格行为符合预期；任务管理器/`tasklist` 确认取消后无残留子进程。
 
@@ -395,12 +397,49 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 - `output.schema` 里的 `object` 节点必须显式声明 `additionalProperties`（DSH 的 `ObjectValueSchemaSpec` 强制要求，不允许依赖 JSON Schema 默认值）。
   > ⚠️ **例外**：`parameters` 的**根节点**是隐式开放对象（`dsh-tools/lib/types/schema.d.ts:161`），**不要**在那里加 `additionalProperties`。
 
+### 5.1 `transcribe_audio` 的执行模型：`jobs` 后台作业（B3 决策）
+
+**为什么**：`small` ≈ 1.7× 实时，1 小时录音要 ~35 分钟。工具超时是**协作式**的（`timeout-policy` 只读工具声明的 `timeoutMs`，未声明就不设表；无硬上限），但同步等待会白占一次工具调用，且 DSH 已有现成的后台作业设施。
+
+**分工**：`transcribe_audio` 走后台作业；`video_frames` **保持同步**（抽帧只需秒级，且帧图必须在 `execute` 里落到附件服务，异步拿不到内联渲染）。
+
+契约（均已核实）：
+
+| 项 | 事实 | 出处 |
+|---|---|---|
+| 服务键 | `interface Context { jobs: JobRegistry }` → `ctx.jobs` | `dsh-jobs/lib/types/index.d.ts:16-18` |
+| 起作业 | `ctx.jobs.start(spec: JobSpec): JobId`；`spec.run(job)` **同步**返回 `JobHooks`（含 `done: Promise<JobOutcome>`） | `dsh-jobs/lib/types/types.d.ts:117-149`、`index.d.ts:71` |
+| 进度/输出 | `JobHandle.append(text, options?)`、`updateProgress(line)` | `types.d.ts:79-94` |
+| 读结果 | 模型侧用**已挂载**的 `job_output` / `job_list` / `job_kill` 工具（`@deepseek-ai/dsh-tool-jobs`） | `dsh-tool-jobs/lib/index.js:298,348,368` |
+| 归属 | `spec.owner = exec.agent?.session.id` ⇒ 作业随会话回收 | `types.d.ts:122-128` |
+| 自定 kind | `JobKindMap` 是**可合并扩展**的（现有 `bash`/`subagent`）⇒ 声明合并加 `transcribe: 'transcribe'` | `dsh-jobs/lib/types/view.d.ts:26-31` |
+| 模型面预算 | `spec.outputLimitBytes` 同时约束**完成通知**与**输出读取** | `types.d.ts:129-134` |
+
+**流程**：
+
+1. `execute` 做前置校验（文件存在、ffmpeg/python/faster-whisper 可用），失败照旧 `throw`；
+2. `ctx.jobs.start({ kind: 'transcribe', label, owner, outputLimitBytes, run(job) { … } })`，`run` 内用 `ctx.subprocess` 跑「抽音轨 → python worker」，把分段文本经 `job.append` 写入 ring，`finally` 里删临时 WAV；
+3. `execute` **立即**返回 canonical 值（含 `jobId`），不阻塞；
+4. 模型用 `job_output` 读转写结果；若要中断用 `job_kill`。
+
+**必须注意**：`exec.signal` 仍要透传到 `ctx.subprocess`（用户在作业运行中取消会话/中断时能真正杀掉 ffmpeg+python）；worker 的 JSON 落文件读取，不要把大 JSON 塞进 ring 之外的通道；ring 有上限，超长转录要如实标 `truncated`。
+
 ---
 
 ## 6. 输出契约草案
 
 ```ts
-// transcribe_audio
+// transcribe_audio —— 立即返回作业句柄，转写结果经 job_output 读取
+{
+  jobId: string                    // 如 'transcribe-1'
+  status: 'running'                // 起作业后必然是 running
+  backend: 'whisper-local'
+  model: string                    // 实际使用的 whisper 规格
+  note: string                     // 提示模型用 job_output 取结果
+  reason?: 'no-audio-track'        // 前置探测已判定无音轨时，直接给结论、不起作业
+}
+
+// job_output 读到（并作为转写正文的正式形状）
 {
   text: string
   language: string
@@ -440,7 +479,9 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 | `whisper.computeType` | `int8` | 本机 `get_supported_compute_types('cpu')` = `int8` / `int8_float32` / `int16` / `float32` |
 | `whisper.modelCacheDir` | 系统缓存 | 本机实际：`C:\Users\Administrator\.cache\huggingface\hub`，**已预置 tiny/base/small/medium（2.08 GB）** |
 | `whisper.localFilesOnly` | 建议 `false`（模型已预置，可留联网兜底） | 本机实测 `local_files_only=True` 全通，离线环境可置 `true` |
-| `whisper.timeoutMs` | 覆盖下载+长音频 | ⚠️ `SubprocessSpawnSpec` **没有** `timeoutMs`，要自己用 `signal` 实现 |
+| `whisper.timeoutMs` | 覆盖下载+长音频 | ⚠️ `SubprocessSpawnSpec` **没有** `timeoutMs`，要自己用 `signal` 实现（这里的 `timeoutMs` 是本插件内部的子进程预算，不是工具超时） |
+| `transcribe.jobOutputLimitBytes` | `262144`（256 KiB） | 作业的**模型面**字节上限，同时约束输出读取与完成通知（`JobSpec.outputLimitBytes`，`dsh-jobs/lib/types/types.d.ts:129-134`） |
+| `transcribe.maxSegments` | `5000` | 分段上限；超出即截断并置 `truncated: true`（job ring 有上限，超长转录必须如实标注） |
 | `frames.threshold` | `0.3` | 场景变化灵敏度 |
 | `frames.maxFrames` | **`16`** | 单次抽帧上限。⚠️ 实测 `imageLimits.maxImagesPerMessage` 默认正好是 **20**，卡边界没有余量，故默认留出余量 |
 | `frames.jpegQuality` | `3` | ffmpeg `-q:v`，数值越小越清晰越大 |
@@ -456,7 +497,8 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 |---|---|---|---|
 | R1 | Windows ACL 沙箱在非提权 `dsh web` 下无法初始化（C5） | `workspace-write` / `read-only` 模式下**所有**命令失败 | 已切 `danger-full-access` 解除；如需受限执行须以管理员启动 `dsh web`（`icacls` 修不了 SACL 特权缺失） |
 | R2 | 路由未声明图片输入（C2） | 含图结果 → 整轮模型调用失败 | **已为默认模型声明 `input: [text,image]` 且实测生效**；Phase 3 门控保留为防御；README 说明 |
-| R2b | 过度声明图片能力（C2） | provider 在回合中途拒绝，消息已落盘、会话反复重试 | 若出现该错误，删掉那 4 行 `input:` 回滚（⚠️ 勘误：原文建议的替代路由 `litellm/Qwen3-VL-4B` 在本机不存在） |
+| R2b | 过度声明图片能力（C2） | provider 在回合中途拒绝，消息已落盘、会话反复重试 | ✅ **本机已实测排除**（§10.4，随机码真图验证通过）。门控仍作为换路由时的防御保留；若日后真出现该错误，删掉那 4 行 `input:` 回滚 |
+| **R2c** | 作业（jobs）路径引入的新失败面：会话中断时作业是否真的停、ring 溢出丢字、临时 WAV 泄漏 | 长音频下最可能出现"看着跑完了其实被截断" | `exec.signal` 透传到 `ctx.subprocess`；`transcribe.maxSegments` + `truncated` 如实标注；`run` 的 `finally` 删临时文件；`owner = session.id` 让作业随会话回收 |
 | R3 | Whisper 模型首次下载体积大（已装 `faster-whisper 1.2.1`） | 首调用像卡死 | ✅ 已基本消除：本机**已预置 tiny/base/small/medium（2.08 GB）**，实测 `local_files_only=True` **离线可加载**，首调用无需下载；仍保留下载进度提示与 `modelCacheDir` 预置能力 |
 | R3b | **`av>=19` 与 faster-whisper 1.2.1 不兼容**（已实测） | 模型能加载但**推理必崩**（`TypeError: metadata_errors`），且错误信息与真实原因相距很远 | 钉 **`av<19`**（本机落 `18.1.0`）；`media_probe` 校验 `av` **主版本 < 19**；README 写明 |
 | R3c | **`-vsync` 不可信**（ffmpeg 9 已移除，6.0 已废弃） | 抽帧命令报 `Unrecognized option 'vsync'` | 统一用 `-fps_mode vfr`（ffmpeg **5.1+** 通用）；本机实装 **6.0** |
@@ -559,6 +601,22 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 
 **待办**：`large-v3` 未拉取（CPU-only，预计慢于实时；如需按需 `transcribe` 首次下载）；GPU 推理不可行（无驱动/设备）。
 
+### 10.4 vision 真图验证（B4，已通过）
+
+**要验的是什么**：默认路由 `dsh/coding-standard-local` 声明了 `input: [text, image]`，但这是"过度声明"（见 C2/R2b）——本机从未真正投喂过图片。若上游实际不接受，`video_frames` 一返回 image 块就会让**整轮对话**失败且消息已落盘。
+
+**方法**（带反向控制，避免"看到想看到的"）：
+
+1. 用 ffmpeg 生成 880×420 PNG：深色底 + 上方红条 + 下方蓝条 + 中间一串 **6 位随机码**。随机码写入 `vision-answer.txt` 后**全程不打印** ⇒ 它**从未进入模型上下文**，只能靠"看见"才能读出。
+2. 用 `read_image` 读该 PNG。这条通路与 `video_frames` **完全一致**：工具结果里放 `ImageBlock`（附件服务持久化 + pi-ai 对 role `'tool'` 的 image 豁免，`dsh-llm-pi-ai/lib/index.js:1185`）。
+3. 模型先复述所见，再打开答案文件核对。
+
+**结果**：模型读出 **`FFEJD9`**，与答案文件一字不差；并正确描述"上方红条、下方蓝条"。
+
+**结论**：默认路由**确实接受并理解工具结果中的 image 块**，全程无 `UNSUPPORTED_CONTENT`。R2b 的过度声明在本机有真实能力兜底；C2 的能力门控仍作为**换路由时的防御**保留，不回滚那 4 行 `input:`。
+
+**素材**：`%USERPROFILE%\.dsh\media-selftest\vision-test.png`（另有 `vision-answer.txt`、`font.ttf`）。
+
 ---
 
 ## 11. 实现就绪度检查表（2026-10-15）
@@ -573,7 +631,8 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 | profile 服务齐备性 | ✅ | `dsh --profile web --dump-config` 实测已挂载：`@deepseek-ai/dsh-tools`（id `tools`）、`dsh-llm`、`dsh-attachment-local`（id `attachment-local`）、`dsh-subprocess-local`（id `subprocess`）、`dsh-jobs-local`（id `jobs`）、`dsh-tool-call-timeout-policy`（id `timeout-policy`） |
 | 工具注册 API | ✅ | `interface Context { tools: ToolRuntime }`（`dsh-tools/lib/types/index.d.ts:33-34`）；`ctx.tools.register(definition): () => void`（同文件 `:636`，返回注销器）；`defineTool(options)` 由 `@deepseek-ai/dsh-tools` 导出（`lib/index.js:838`） |
 | 插件 import 解析机制（**关键未知已澄清**） | ✅ | 宿主对**声明为 peerDependencies** 的 DSH 包做**模块解析拦截**：`dsh-app-boot/lib/index.js:1470-1500` 的 `routeLinked()` 读取请求方的 peer 名（`readPeerNames(directory)`），命中即路由到宿主自己的那份实现 ⇒ **插件必须把 `@deepseek-ai/dsh-*` 写进 peerDependencies，运行时由宿主提供**（这也解释了为何 profile 的 `node_modules` 里没有这些包，而 `dsh-better-sidebar` 仍能工作） |
-| 长任务超时 | ✅ 无硬上限 | `timeout-policy` 读 `ctx.tools.get(name)?.timeoutMs`，**为 `undefined` 时不设表**（`lib/index.js:123-125`）；到期返回 `TOOL_TIMEOUT` 文案（`:93-94`）。**协作式**：工具必须自己尊重 `exec.signal` |
+| 长任务执行模型 | ✅ 已定 | **走 `jobs` 后台作业**（B3 决策 + 契约见 §5.1）：`ctx.jobs`（`dsh-jobs/lib/types/index.d.ts:16-18`）+ 已挂载的 `job_output`/`job_list`/`job_kill`（`dsh-tool-jobs`）。工具超时本身无硬上限且是协作式的（`timeout-policy` 只读工具声明的 `timeoutMs`，未声明就不设表），但长转录不再依赖它 |
+| vision 通路 | ✅ 已实测 | 工具结果里的 image 块被默认路由正确理解（§10.4，随机码真图 `FFEJD9` 读出并核对通过） |
 | 兼容性口径 | ✅ | `>=0.2.0-rc.2`（见 §3 注：必须带点；`cordis` 不参与判定） |
 | 测试素材 | ✅ | `%USERPROFILE%\.dsh\media-selftest\`（真实语音 13s + 合成色块视频 + 16k WAV） |
 | 本机范本 | ✅ | `dsh-better-sidebar@0.26.0` 的 `package.json` 可直接照抄清单形状；`.pnpm` 内有 `dsh-tool-fs` / `dsh-tool-fs-search` / `dsh-experimental-speech-to-text-sensevoice` 作实现范本 |
@@ -604,20 +663,20 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
 
 | # | 事项 | 性质 | 处置 |
 |---|---|---|---|
-| **B1** | **需再重启一次 `dsh web`** | 环境 | python 3.14 的 PATH 提升发生在最近一次重启之后 ⇒ 当前 DSH 子进程里 `python` 仍是 3.15（实测后台跑 faster-whisper 报 `ModuleNotFoundError`）。**重启前插件必须用绝对路径或 `whisper.pythonPath`**，且 `media_probe` 要如实报错 |
+| **B1** | ~~需再重启一次 `dsh web`~~ | 环境 | ✅ **已解决**：重启后 DSH 子进程里 `python` 已解析到 3.14.8。探针仍要实测 `import faster_whisper`，不认路径 |
 | **B2** | **本机没有现成的"宿主侧第三方插件"范本** | 工程 | 已澄清机制（peer 声明 + 宿主拦截，§11.1），可照 `dsh-better-sidebar` 的 `package.json` 形状起步；Phase 1 的 `media_probe` 就是用来一次性验证装载链路的，**建议先只做这一件事再写业务代码** |
-| **B3** | **长音频 × 工具超时（设计决策）** | 设计 | 无硬上限，但超时是**协作式**的：`small` ≈ 1.7× 实时 ⇒ 1 小时录音要 **~35 分钟**，期间占用一次工具调用。两条路线：① 声明大 `timeoutMs` 并严格透传 `exec.signal`（简单，但阻塞式）；② 用已挂载的 `jobs` 服务（`start/list/read/kill/wait`，`dsh-jobs/lib/types/index.d.ts:59-137`）跑后台任务 + 轮询（复杂，但符合本机 `dsh-tool-jobs` 的既有模式）。**需先定这条** |
-| **B4** | **vision 路由是"过度声明"，本机未实测** | 风险（R2b） | `coding-standard-local` 声明了 `input: [text,image]`，但本机从未真正投喂过图片验证上游接受。若 provider 在回合中途拒绝，消息已落盘。→ Phase 3 第一件事就是**用一张小图做真实验证**；失败则回滚那 4 行 |
+| **B3** | ~~长音频 × 工具超时~~ | 设计 | ✅ **已决：走 `jobs` 后台任务**。`ctx.jobs.start(spec)` 起一个 `kind: 'transcribe'` 的后台作业，工具**立即**返回 `jobId`；模型用已挂载的 `job_output`/`job_list`/`job_kill` 读结果。契约见 §5.1，配置见 §7 |
+| **B4** | ~~vision 路由是"过度声明"，本机未实测~~ | 风险（R2b） | ✅ **已实测通过**（2026-10-16）：用 `read_image` 把一张含**随机码**的 PNG 作为**工具结果**投给默认路由 `dsh/coding-standard-local`，模型读出了 `FFEJD9`，与事先写入、从未进入模型上下文的答案完全一致 ⇒ 上游**确实接受并理解**工具结果里的 image 块，那条 `input: [text, image]` 声明有真实能力兜底。详见 §10.4 |
 | **B5** | `maxImagesPerMessage = 20` | 约束 | `maxFrames` 默认取 16 留余量；工具描述里提示模型按需调小 |
-| **B6** | 工作区**不是 git 仓库** | 工程 | `git init` + 首次提交（建议在写代码前做，便于回滚与 code review） |
+| **B6** | ~~工作区不是 git 仓库~~ | 工程 | ✅ **已解决**：已 `git init`、身份设为维护者、并推送到 `reamerit/dsh-media-understanding`；提交前的署名扫描写入 `AGENTS.md` |
 | **B7** | 会话回放出图 | 实现细节 | 必须同时实现 `output.presentationMeta` + `presentResult`，只写 `presentResult` 在回放时拿不到 attachment |
 | **B8** | 无 GPU / `large-v3` 不可用 | 限制 | 已在文档写明；`device` 固定 `cpu` |
 
 ### 11.4 建议的开工顺序
 
-1. `git init` + 首次提交（B6）
-2. 骨架（package.json / tsconfig / cordis.patch.yml）+ **只注册 `media_probe`** → 装进 profile → 重启 `dsh web`（顺带解决 B1）→ 新会话确认工具可见可调用
-3. `transcribe_audio`（worker + 错误分类，含 B1 的依赖探测）
-4. `video_frames`（先做 B4 的真实图片门控验证，再做抽帧与附件持久化）
-5. 横切：超时策略（B3 决策落地）、取消、`presentationMeta`/`presentResult`（B7）
+1. ~~`git init` + 首次提交~~ ✅ 已完成
+2. 骨架（package.json / tsconfig / cordis.patch.yml）+ **只注册 `media_probe`** → 装进 profile → 重启 `dsh web` → 新会话确认工具可见可调用
+3. `transcribe_audio`：`jobs` 后台作业（§5.1）+ worker + 错误分类
+4. `video_frames`：抽帧 + 附件持久化（B4 已先行验证通过，可直接照 `read_image` 的既有通路实现）
+5. 横切：`jobs` 的取消与进度、`presentationMeta`/`presentResult`（B7）
 6. 测试 + README

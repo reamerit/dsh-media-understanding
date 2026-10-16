@@ -551,7 +551,16 @@ py -0p →  -V:3.15   ...\Python315\python.exe
 | # | 原状态 | 现状 |
 |---|---|---|
 | D1 | 内存 4 GB，`base`+/长音频可能 `mkl_malloc` | ✅ **已解决**（64 GB） |
-| D2 | `python` 指向 3.15，需 `whisper.pythonPath` | ✅ **已解决**（3.14 已为默认）；⚠️ 需再重启一次 `dsh web` 才对 DSH 子进程生效 |
+| D2 | `python` 指向 3.15，需 `whisper.pythonPath` | ✅ **已解决**（3.14 已为默认，重启后 DSH 子进程亦为 3.14.8） |
 | D3 | `dsh web` 未重启，PATH 里没有 ffmpeg | ✅ **已解决**（重启后 `Get-Command ffmpeg` 命中） |
 | D5 | 无 GPU，`device: auto` 等于 `cpu` | 未变（仍建议显式 `cpu`） |
 | D4 / D6 / D7 | — | 未变 |
+
+### 9.7 两项设计决策（2026-10-16）
+
+| 项 | 决策 | 记录位置 |
+|---|---|---|
+| 长音频执行模型 | **走 `jobs` 后台作业**：`transcribe_audio` 起 `kind: 'transcribe'` 作业后立即返回 `jobId`，正文由 `job_output` 读取；`video_frames` 保持同步（抽帧秒级，且帧图需在 `execute` 内落附件服务） | 计划 §5.1（契约）、§6（输出）、§7（配置）、§8 R2c |
+| vision 真图 | **已实测通过**：`read_image` 把含随机码的 PNG 作为工具结果投给默认路由，模型读出 `FFEJD9` 与未入上下文的答案一致 ⇒ 工具结果里的 image 块被上游接受并理解，R2b 的过度声明有真实能力兜底 | 计划 §10.4（方法+证据） |
+
+> 这两项都已闭环，不再是开工前的待决项；§9.6 的 D4/D6/D7 也不构成阻断（见计划 §11.3）。
