@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# build output
+lib/
+*.tsbuildinfo
+
+# logs and local scratch
+*.log
+logs/
+tmp/
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
