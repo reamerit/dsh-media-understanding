@@ -6,6 +6,8 @@
 > ⚠️ **后续实现全部在本机进行，一切以本机为准**：本机为 `C:\workspace\github\dsh-media-understanding` + **DSH 0.2.0-rc.2**，硬件 **2×Xeon Gold 5118 = 8 核 / 64 GB / 无 GPU**。所有环境相关的路径、版本、默认值以**顶部勘误块 + §10.2**为唯一权威。
 >
 > **2026-XX 更新（Phase 0 已执行）**：环境探测完成，结果见 §10；照片输入路由已配置并**实测生效**（见 C2）；命令沙箱根因已定位（见 C5）；`ffmpeg` 与 `faster-whisper` 已在安装。
+>
+> ⚠️ **2026-10-16 硬件更正**：本机**有 NVIDIA Tesla P40（GP102，24 GB，计算能力 6.1，KVM 直通）**，此前"无 GPU"的记载是因为宿主一直没装内核驱动。设备与驱动现状、Pascal 的支持边界（CUDA 12.x / R580 为止）、以及插件的 GPU 优先 + 无卡降级要求见 **§5.1.0** 与复审报告 §9.4.2。**CPU 路径始终保留**，是无卡环境的唯一依靠。
 
 > ## ⚠️ 勘误（2026-10-15 复审，详见 [coding-plan-review.md](./coding-plan-review.md)）
 >
@@ -24,7 +26,7 @@
 > | 9 | §4 Phase 1"自动探测 python" | 本机原默认 `python` 是 3.15（装不了 faster-whisper：`ctranslate2`/`onnxruntime` 无 cp315 wheel）。**现已把 3.14 提升为默认**（用户 PATH 中 3.14 优先 + `PY_PYTHON=3.14`）；探针仍应**实测 `import faster_whisper`** 而非只认路径 |
 > | 10 | §10 环境表 | 整表失真，见 §10.2 的实测值 |
 > | 11 | §3"参考 `dsh-context`、`dsh-knowledge`" | 本机**未安装**这两个包；改用 `.pnpm` 内的真实参考（`dsh-tool-fs` 的 `read_image`、`dsh-tool-fs-search` 的 spawn、`dsh-experimental-speech-to-text-sensevoice` 的长驻 worker） |
-> | 12 | 原文按"小机器"推断的默认值 | **硬件已扩容为 8 核 / 64 GB（无 GPU）**：`whisper.model` 默认改回 **`small`**（13s 音频 7.9s ≈ 1.7× 实时；`medium` 仅 0.6× 实时，慢于实时不推荐作默认）；内存相关限制已消失；`device` 仍应为 **`cpu`**（无 GPU） |
+> | 12 | 原文按"小机器"推断的默认值 | **硬件已扩容为 8 核 / 64 GB**（⚠️ **2026-10-16 更正：本机有 NVIDIA Tesla P40 24 GB 且已打通，不再"无 GPU"**，见 §5.1.0 与复审报告 §9.4.2）：`whisper.model` 默认改回 **`small`**（13s 音频 7.9s ≈ 1.7× 实时；`medium` 仅 0.6× 实时，慢于实时不推荐作默认）；内存相关限制已消失；`device` 应为 **`auto`**（有卡解析为 `cuda`，无卡自动落 `cpu`） |
 >
 > **计划未预见、但本机实测撞到的阻断级环境缺陷**：`C:\Windows\System32\MSVCP140.dll` 为 2019 年的 14.22.27821.0，导致 `ctranslate2`/`onnxruntime` 一调用就 **`0xC0000005` 硬崩溃（无 traceback）**。已装 VC++ 2015-2022 可再发行组件修复（→ 14.44.35211.0）。`media_probe` 应把"子进程无输出退出且退出码为 `0xC0000005`/`-1073741819`"识别为独立的运行时缺失错误。
 
@@ -184,8 +186,8 @@ src/workers/transcribe.py    # 读参数 → WhisperModel(...).transcribe(...) �
 
 由 `ctx.subprocess.spawn` 以 `argv: [python, workerPath, audioPath, model, language]` 调用，JSON 结果落文件后读取（避免大 JSON 走 stdout 被 collect 截断）。首次运行会自动下载模型，需要：
 
-- 允许配置 `model` 规格（`tiny`/`base`/`small`/`medium`/`large-v3`）。本机 8 核实测（13.0s 真实语音）：`tiny` 1.6s（8.0× 实时）/ `base` 2.8s（4.6×）/ **`small` 7.9s（1.7×，默认）** / `medium` 21.7s（**0.6×，慢于实时，不作默认**）→ **默认 `small`**；
-- ⚠️ **勘误**：模型可在**离线**下加载（本机已预置 `tiny`/`base`/`small`/`medium`，实测 `local_files_only=True` 通过），因此 worker 应支持离线/已就绪判定，而不是每次都尝试联网；
+- 允许配置 `model` 规格（`tiny`/`base`/`small`/`medium`/`large-v3`）。本机 8 核实测（13.0s 真实语音）：`tiny` 1.6s（8.0× 实时）/ `base` 2.8s（4.6×）/ **`small` 7.9s（1.7×，默认）** / `medium` 21.7s（**0.6×，慢于实时，不作默认**）→ **默认 `small`**；⚠️ **2026-10-16 补测**：`large-v3` 已拉取（blobs 2.88 GB）并实测 **0.71×（中文）/ 0.41×（英文）实时**，中文 CER 4.8% 略优于 `small` 的 6.0%，仍不作默认（见复审报告 §9.4.1）；
+- ⚠️ **勘误**：模型可在**离线**下加载（本机已预置 `tiny`/`base`/`small`/`medium`/`large-v3`，实测 `local_files_only=True` 通过），因此 worker 应支持离线/已就绪判定，而不是每次都尝试联网；
 - 工具需要有反馈的长超时（下载阶段可能数分钟），并如实告知模型未就绪；
 - ⚠️ **勘误**：内存/提交余量不足时表现为 `RuntimeError: mkl_malloc: failed to allocate memory`（可捕获，非崩溃）→ 应作为独立错误类如实回报"内存不足"，而不是笼统的"模型加载失败"。
 
@@ -284,7 +286,7 @@ with av.open(input_file, mode="r", metadata_errors="ignore") as container:
     - id: media-understanding
       name: dsh-media-understanding
       config:
-        whisper: { model: small, device: cpu }      # 8 核/64 GB、无 GPU：small ≈1.7× 实时
+        whisper: { model: small, device: auto }      # auto：有卡用 CUDA（P40 实测 4.55×），无卡自动落 CPU（3.18×）
         frames: { threshold: 0.3, maxFrames: 16 }   # 见 §7 注（imageLimits.maxImagesPerMessage = 20，留余量）
 ```
 
@@ -329,7 +331,7 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 ### Phase 0 · 环境与能力探测 —— ✅ 已完成（结果见 §10）
 
 1. ~~修复沙箱~~ → 已定位根因（C5）并以 `danger-full-access` 解除阻塞。
-2. ⚠️ **勘误（2026-10-15 在本机重做 Phase 0）**：原记录 `python 3.14.3`、`node v24.14.0`、ffmpeg "正在装"，与本机不符。本机最终状态：`ffmpeg`/`ffprobe` **6.0**（已装 + 已在用户 PATH 生效）、**`python` 默认 3.14.8**（原默认 3.15 装不了 faster-whisper，已把 3.14 提升为默认；3.15 保留可用）、`faster_whisper 1.2.1` + **`av 18.1.0`（钉 `av<19`）** + `ctranslate2 4.8.3` + `onnxruntime 1.31.0`、`node` **v26.8.2**（`pnpm 12.4.1` 可用）、模型 **tiny/base/small/medium 已预置**。硬件为 **2×Xeon Gold 5118 = 8 核 / 64 GB / 无 GPU**。逐项结果见 §10.2。
+2. ⚠️ **勘误（2026-10-15 在本机重做 Phase 0）**：原记录 `python 3.14.3`、`node v24.14.0`、ffmpeg "正在装"，与本机不符。本机最终状态：`ffmpeg`/`ffprobe` **6.0**（已装 + 已在用户 PATH 生效）、**`python` 默认 3.14.8**（原默认 3.15 装不了 faster-whisper，已把 3.14 提升为默认；3.15 保留可用）、`faster_whisper 1.2.1` + **`av 18.1.0`（钉 `av<19`）** + `ctranslate2 4.8.3` + `onnxruntime 1.31.0`、`node` **v26.8.2**（`pnpm 12.4.1` 可用）、模型 **tiny/base/small/medium 已预置（2026-10-16 又补上 `large-v3`，五档齐备）**。硬件为 **2×Xeon Gold 5118 = 8 核 / 64 GB / 无 GPU**。逐项结果见 §10.2。
 3. 运行时服务齐备性：`ctx.tools` / `ctx.llm` / `ctx.attachments` / `ctx.subprocess` 均为已发布 Service Definition；本 profile 的 bundles 为 `dsh-base`、`dsh-web-app`、`dshmarket`、`mattpocock-skills-dsh`、`dsh-better-sidebar`；**Phase 1 的 `media_probe` 会做实际可用性断言**。
 4. 默认路由 `inputModalities`：已确认图片可用（C2 实测，`input: [text,image]` 已在 profile 中）。
 
@@ -354,7 +356,7 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
    - 参数（`defineTool` 的 spec DSL，注册时会被 `parameterSchemaSpecToJsonSchema` 编译）：`file_path`（string, required）、`language`（string, 可选）、`translate_to_english`（boolean, 可选）、`backend`（enum: `whisper-local`）。
    - 输出：**立即返回作业句柄** `{ jobId, status, backend, model, note, reason? }`（⚠️ B3 决策：走 jobs，契约见 §5.1/§6），转写正文经 `job_output` 读取，`render` 出带时间戳的纯文本。
 2. `extractAudio()`：非音频容器先经 ffmpeg 抽轨到 16k 单声道 WAV（`os.tmpdir()` + `mkdtempSync`，`finally` 清理）。
-3. `src/workers/transcribe.py`：`WhisperModel(model, device='cpu', compute_type='int8', local_files_only=…)` → `transcribe(audio, language=..., beam_size=5, vad_filter=True)` → 写 JSON 到 `--out`（⚠️ 默认 `cpu` 而非 `auto`；模型已预置，优先离线）。
+3. `src/workers/transcribe.py`：`WhisperModel(model, device=<解析结果>, compute_type=<可用档>, local_files_only=…)` → `transcribe(audio, language=..., beam_size=5, vad_filter=True)` → 写 JSON 到 `--out`。⚠️ **device/computeType 按 §5.1.0 解析**（`auto` → `cuda`+`int8_float32`，无卡则 `cpu`+`int8`）；模型已预置，优先离线。
 4. `whisper.ts`：解析 `whisper.pythonPath`，**实测 `import faster_whisper`** 判定可用（不认路径）；作业用 `ctx.jobs.start({ kind: 'transcribe', owner, outputLimitBytes, run })`，`run` 内 `ctx.subprocess` 跑抽轨 + worker，`job.append` 写进度与正文，`exec.signal` 全程透传。
 5. 错误分类（C4b，新增两个本机实测错误类）：python 缺失 / faster_whisper 未安装 / **缺 MSVC 运行时（子进程无输出退出、退出码 `0xC0000005`）** / **内存不足（`mkl_malloc`）** / 模型下载失败 / 无音轨（前置探测即返回 `reason: 'no-audio-track'`，**不起作业**）。
 
@@ -416,6 +418,22 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 - **`execute` 只返回一个根值**，形状严格匹配 `output.schema`（框架会用 `valueSchemaSpecToJsonSchema` 校验）；写错会被 `ToolOutputError` 拒。
 - `output.schema` 里的 `object` 节点必须显式声明 `additionalProperties`（DSH 的 `ObjectValueSchemaSpec` 强制要求，不允许依赖 JSON Schema 默认值）。
   > ⚠️ **例外**：`parameters` 的**根节点**是隐式开放对象（`dsh-tools/lib/types/schema.d.ts:161`），**不要**在那里加 `additionalProperties`。
+
+### 5.1.0 执行设备解析（GPU 优先 / 无卡自动降级）★ 2026-10-16 新增
+
+**背景**：本机实际有 **NVIDIA Tesla P40（GP102，24 GB，计算能力 6.1）**，已通过 KVM 直通到本虚拟机（`PCI\VEN_10DE&DEV_1B38` 可见、`Problem=CM_PROB_NONE`）。此前记的"无 GPU"是**误判**：硬件在，但驱动从未真正加载——`nvlddmkm` 服务是 `Start=3`（按需启动）+ `ErrorControl=0`，且设备节点停在 `DN_NEED_RESTART` 的残状态，于是 `nvidia-smi` 报 "couldn't communicate with the NVIDIA driver"、`cuInit(0)` 返回 **100**、`ctranslate2.get_cuda_device_count()` 为 **0**。2026-10-16 已修好（把服务改成引导启动 + `pnputil /remove-device` + `/scan-devices` 重建节点，**全程未重启机器**），现状 `nvidia-smi` 报 **23040 MiB / 驱动 573.76 / compute cap 6.1**，`cuInit=0`、`cuDeviceGetCount=1`、`ctranslate2.get_cuda_device_count()=1`。完整过程、实测加速比与 Windows 上的 Pascal 支持边界（**R580 起 Windows INF 已不含 `DEV_1B38`**）见复审报告 §9.4.2。
+
+**插件必须两头都能跑**——这是硬要求，不是可选项：
+
+1. **有卡就用卡**：`whisper.device` 默认 **`auto`**，解析顺序 `cuda → cpu`；`whisper.computeType` 默认 **`auto`**，用 `ctranslate2.get_supported_compute_types(device)` 在解析出的 device 上取可用档（本机实测：GPU 选 **`int8_float32`**、CPU 选 `int8`），**不要硬编码 `float16`**——P40 会直接拒绝它（见 §7 与复审报告 §9.4.2）。
+2. **无卡必须照常工作**：不得把 CUDA 依赖写成硬前提。没有 NVIDIA 驱动 / 卡被其它 VM 占用 / 直通未生效时，`get_cuda_device_count() == 0` ⇒ 静默落到 `cpu` + `int8`，功能与今天完全一致。**任何 CUDA 探测失败都不得抛错**，只记录原因。
+3. **探测要"真能推理"而非"看得到设备"**：只查 `get_cuda_device_count()` 不够（MSVCP140 事故就是"`import` 能过、一推理就崩"）。`media_probe` 应在所选 device 上**真的构造一次模型或跑一次极短推理**，并如实回报结果与失败原因。
+4. **解析结果要可见**：`media_probe` 返回 `device`（实际生效值 `cuda`/`cpu`）、`deviceSource`（`config`/`auto`）、`reason`（降级原因，如 `no-cuda-driver` / `cuda-probe-failed` / `unsupported-compute-type`）、`gpu`（`nvidia-smi` 摘要：型号/显存/驱动版本，取不到给 `null`）。模型和人都要能从工具输出看出"这次用了什么、为什么"。
+5. **GPU 的不确定性写进工具描述**：`transcribe_audio` 的 description 要说明"默认自动选 GPU，无 GPU 时自动用 CPU"，免得模型对 `device` 做无根据的假设。
+
+**验证要求（两条路径都要覆盖）**：把解析逻辑写成纯函数或注入探测结果后，测试分别喂"有卡 / 无卡"两组，断言解析出的 `device`、`computeType` 与 `reason`；**无卡路径是回归重点**（等价于今天本机可复现的真实环境）。
+
+---
 
 ### 5.1 `transcribe_audio` 的执行模型：`jobs` 后台作业（B3 决策）
 
@@ -494,10 +512,10 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `whisper.pythonPath` | **`C:\Users\Administrator\AppData\Local\Programs\Python\Python314\python.exe`** | 本机 `python` **已是 3.14.8**（PATH + `py` 启动器默认），故自动探测通常可命中；仍建议显式配置，且探针要**实测 `import faster_whisper`**（3.15 缺依赖，装不上 faster-whisper） |
-| `whisper.model` | **`small`** | `tiny`/`base`/`small`/`medium`/`large-v3`。本机 8 核实测：`tiny` 8.0× / `base` 4.6× / **`small` 1.7×** / `medium` **0.6×（慢于实时，不推荐）**；`tiny`/`base`/`small`/`medium` 均已预置并**离线可用** |
-| `whisper.device` | **`cpu`** | `auto`/`cpu`/`cuda`。本机**无 GPU**（`cuda_device_count == 0`，`nvidia-smi` 无法通信）→ `auto` 等价 `cpu`，写 `cpu` 更明确；`cuda` 必然报错 |
-| `whisper.computeType` | `int8` | 本机 `get_supported_compute_types('cpu')` = `int8` / `int8_float32` / `int16` / `float32` |
-| `whisper.modelCacheDir` | 系统缓存 | 本机实际：`C:\Users\Administrator\.cache\huggingface\hub`，**已预置 tiny/base/small/medium（2.08 GB）** |
+| `whisper.model` | **`small`** | `tiny`/`base`/`small`/`medium`/`large-v3`。本机 8 核实测：`tiny` 8.0× / `base` 4.6× / **`small` 1.7×** / `medium` **0.6×（慢于实时，不推荐）** / `large-v3` **0.71× 中文 · 0.41× 英文（2026-10-16 补测，中文 CER 4.8% 最好但不作默认）**；五档均已预置并**离线可用** |
+| `whisper.device` | **`auto`（≥2026-10-16 起）**；无卡环境实际生效 `cpu` | `auto`/`cpu`/`cuda`。**本机有 NVIDIA Tesla P40（24 GB，计算能力 6.1，KVM 直通）**，驱动 573.76 加载后解析为 `cuda`；无 NVIDIA 驱动或直通未生效时必须静默落回 `cpu`（见 §5.1.0）。⚠️ 显式写 `cuda` 在无卡机器上会报错，故默认是 `auto` 而不是 `cpu` |
+| `whisper.computeType` | **`auto`（≥2026-10-16 起）** | 用 `ctranslate2.get_supported_compute_types(device)` 取可用档。**本机实测**：`cuda → {float32, int8, int8_float32}`，`cpu → {float32, int16, int8, int8_float32}`；⚠️ **`float16` 在 P40（GP102）上会被直接拒绝**（`ValueError: ... do not support efficient float16 computation`），故 GPU 侧应选 **`int8_float32`**、CPU 侧选 `int8`，**绝不硬编码 `float16`** |
+| `whisper.modelCacheDir` | 系统缓存 | 本机实际：`C:\Users\Administrator\.cache\huggingface\hub`，**已预置 tiny/base/small/medium/large-v3（blobs 共 4.97 GB）** |
 | `whisper.localFilesOnly` | 建议 `false`（模型已预置，可留联网兜底） | 本机实测 `local_files_only=True` 全通，离线环境可置 `true` |
 | `whisper.timeoutMs` | 覆盖下载+长音频 | ⚠️ `SubprocessSpawnSpec` **没有** `timeoutMs`，要自己用 `signal` 实现（这里的 `timeoutMs` 是本插件内部的子进程预算，不是工具超时） |
 | `transcribe.jobOutputLimitBytes` | `262144`（256 KiB） | 作业的**模型面**字节上限，同时约束输出读取与完成通知（`JobSpec.outputLimitBytes`，`dsh-jobs/lib/types/types.d.ts:129-134`） |
@@ -519,7 +537,7 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 | R2 | 路由未声明图片输入（C2） | 含图结果 → 整轮模型调用失败 | **已为默认模型声明 `input: [text,image]` 且实测生效**；Phase 3 门控保留为防御；README 说明 |
 | R2b | 过度声明图片能力（C2） | provider 在回合中途拒绝，消息已落盘、会话反复重试 | ✅ **本机已实测排除**（§10.4，随机码真图验证通过）。门控仍作为换路由时的防御保留；若日后真出现该错误，删掉那 4 行 `input:` 回滚 |
 | **R2c** | 作业（jobs）路径引入的新失败面：会话中断时作业是否真的停、ring 溢出丢字、临时 WAV 泄漏 | 长音频下最可能出现"看着跑完了其实被截断" | `exec.signal` 透传到 `ctx.subprocess`；`transcribe.maxSegments` + `truncated` 如实标注；`run` 的 `finally` 删临时文件；`owner = session.id` 让作业随会话回收 |
-| R3 | Whisper 模型首次下载体积大（已装 `faster-whisper 1.2.1`） | 首调用像卡死 | ✅ 已基本消除：本机**已预置 tiny/base/small/medium（2.08 GB）**，实测 `local_files_only=True` **离线可加载**，首调用无需下载；仍保留下载进度提示与 `modelCacheDir` 预置能力 |
+| R3 | Whisper 模型首次下载体积大（已装 `faster-whisper 1.2.1`） | 首调用像卡死 | ✅ 已基本消除：本机**已预置 tiny/base/small/medium/large-v3（blobs 共 4.97 GB）**，实测 `local_files_only=True` **离线可加载**，首调用无需下载（`large-v3` 实测：拉取到加载完成 88s、暖启动 11.02s）；仍保留下载进度提示与 `modelCacheDir` 预置能力 |
 | R3b | **`av>=19` 与 faster-whisper 1.2.1 不兼容**（已实测） | 模型能加载但**推理必崩**（`TypeError: metadata_errors`），且错误信息与真实原因相距很远 | 钉 **`av<19`**（本机落 `18.1.0`）；`media_probe` 校验 `av` **主版本 < 19**；README 写明 |
 | R3c | **`-vsync` 不可信**（ffmpeg 9 已移除，6.0 已废弃） | 抽帧命令报 `Unrecognized option 'vsync'` | 统一用 `-fps_mode vfr`（ffmpeg **5.1+** 通用）；本机实装 **6.0** |
 | R3d | **`MSVCP140.dll` 过旧（14.22）**导致 `ctranslate2`/`onnxruntime` **`0xC0000005` 硬崩溃**，**无 traceback、无输出** | 表现为"python 子进程莫名消失"，极难定位；`import` 也可能崩 | ✅ 本机**已修复**（VC++ 2015-2022 → `14.44.35211.0`）；README 列为安装前提；`media_probe` 校验运行时版本，并把"无输出退出 + 退出码 `0xC0000005`/`-1073741819`"识别为独立错误类 |
@@ -577,7 +595,7 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 | OS | Windows Server 2022 Datacenter 20348（KVM 虚拟机） | — |
 | **CPU** | **2 × Intel Xeon Gold 5118 @ 2.30 GHz = 8 核 / 8 逻辑处理器**（`os.cpu_count() == 8`） | 无超线程暴露 |
 | **内存** | **64 GB**（65535 MB，空闲约 61 GB） | 原 4 GB 的内存约束**已消失** |
-| 磁盘 | C: 剩余 **约 71 GB** | 足以容纳 `medium`/`large-v3` 模型 |
+| 磁盘 | C: 剩余 **约 71 GB** | 足以容纳 `medium`/`large-v3` 模型（`large-v3` 实占 2.88 GB，五档 blobs 共 4.97 GB；实测后剩余 **67.8 GB**） |
 | **GPU** | **无**（`nvidia-smi` 无法与驱动通信；`ctranslate2.get_cuda_device_count() == 0`） | **只能 CPU 推理**，CUDA 路径无意义 |
 | node / pwsh / git | **v26.8.2**（nvm）/ 5.1.20348.2849 / 2.47.0，`npm 11.19.1` / `pnpm 12.4.1` 可用 | 无 winget / choco / scoop / uv |
 | **`ffmpeg` / `ffprobe`** | ✅ **6.0**（gyan essentials build）@ `%LOCALAPPDATA%\Programs\ffmpeg\bin`，已在**用户 PATH** 中 | 重启 `dsh web` 后**已生效**（`Get-Command ffmpeg` 命中） |
@@ -587,7 +605,7 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 | **`faster-whisper`** | ✅ 1.2.1 + `ctranslate2 4.8.3` + `onnxruntime 1.31.0` | 装在 3.14 的 site-packages，已随默认 `python` 可用 |
 | **`av`（PyAV）** | ✅ **18.1.0**（钉 **`av<19`**） | 19.0.1 实测报 `TypeError: metadata_errors` |
 | **MSVC 运行时** | ✅ `msvcp140.dll` **14.44.35211.0**（原 14.22.27821.0） | 升级前 `ctranslate2`/`onnxruntime` 必崩 `0xC0000005` |
-| Whisper 模型缓存 | `C:\Users\Administrator\.cache\huggingface\hub` | **已预置 `tiny`/`base`/`small`/`medium`**（blobs 共 2.08 GB），`tiny`/`base`/`small` 实测**离线**可用 |
+| Whisper 模型缓存 | `C:\Users\Administrator\.cache\huggingface\hub` | **已预置 `tiny`/`base`/`small`/`medium`/`large-v3`**（blobs 共 **4.97 GB**，其中 `large-v3` 2.88 GB），五档实测**离线**可用 |
 | 默认模型 | provider **`dsh`** / model `coding-standard-local`，已声明 `input: [text,image]` | vision 可用 |
 | 工作区外可用 vision 路由 | ⚠️ 无。同 provider 另有 `Qwen/Qwen3.6-35B-A3B`、`Qwen/Qwen3-VL-Embedding-2B`（**均未声明 `input`**） | 原文的 `litellm/Qwen3-VL-4B` 不存在 |
 | 参考插件 | `dsh-better-sidebar@0.26.0`（唯一第三方）；`.pnpm` 内有官方 `dsh-tool-fs` 等可作范本 | `dsh-context`、`dsh-knowledge` **未安装** |
@@ -606,7 +624,7 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 | 中文 + 空格文件名 | ✅ argv 传参正常 |
 | VAD（onnxruntime + Silero） | ✅ `vad_filter=True` 全链路通过 |
 | 离线可用性 | ✅ `local_files_only=True` 全通 |
-| `device` 行为 | ✅ `cpu` / `auto` 通过（无 GPU，自动落 CPU）；`cuda` 干净报错 |
+| `device` 行为 | ✅ `cpu` / `auto` 通过；`cuda` 在无线索时干净报错。⚠️ **记录于 2026-10-16 驱动修复之前**；修复后 `cuda` 正常，实测见复审报告 §9.4.2 |
 | 原生库可用性 | ✅ 修复 MSVCP140 后 `ctranslate2` / `onnxruntime` 均可正常构造与推理（**修复前**：`0xC0000005` 硬崩溃） |
 
 **8 核机器上的模型基准**（真实语音 13.0s，`device=cpu, compute_type=int8, beam_size=5, vad_filter=True`）：
@@ -617,9 +635,19 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 | `base` | 0.9s | 2.8s | **4.6×** | 快速档 |
 | **`small`** | 2.0s | 7.9s | **1.7×** | ✅ **推荐默认**（精度/速度平衡） |
 | `medium` | 37.5s（含下载） | 21.7s | **0.6×** | ⚠️ **慢于实时**，1 小时录音需 ~1.7 小时，仅按需使用 |
-| `large-v3` | — | — | — | **未拉取**（约 3.1 GB / 1550M 参数）。CPU 上预计远慢于实时（依据 `medium` 已 0.6×），故不建议作默认；**该行为估算，不是实测** |
+| `large-v3` | 11.0s | 33.9s（中文 24.1s 素材） | **0.71×** | ⚠️ **已拉取并实测**（2026-10-16，blobs 2.88 GB）：中文 0.71× / 英文 0.41×；中文 CER 4.8% 略优于 `small` 的 6.0%。**精度优先的按需档**，完整数据见 [复审报告 §9.4.1](./coding-plan-review.md#941-large-v3-补测2026-10-16已拉取并实测) |
 
-**待办**：`large-v3` 未拉取（CPU-only，预计慢于实时；如需按需 `transcribe` 首次下载）；GPU 推理不可行（无驱动/设备）。
+**同一素材在 P40 上的 GPU 基准**（`cuda` + `int8_float32`，协议不变，详见复审报告 §9.4.2）：
+
+| 模型 | CPU `int8` | **GPU `int8_float32`** | 加速比 |
+|---|---|---|---|
+| `small` | 3.18× 实时 | **25.06×** | 7.9× |
+| `medium` | 1.14× | **12.53×** | 11× |
+| `large-v3` | 0.71× | **4.55×** | 6.4× |
+
+⇒ 有卡时 `large-v3` 变成 **4.55× 实时（1 小时录音约 13 分钟）**，从"仅按需"升格为**可用的默认候选**；CPU 与 GPU 的输出逐字相同（含同样的 CT2 混字），**GPU 不改变精度结论**。⚠️ `float16` 在 P40 上被 CT2 直接拒绝，必须靠 `computeType: auto` 落到 `int8_float32`。
+
+**待办**：~~`large-v3` 未拉取~~ ✅ 已于 2026-10-16 拉取并实测（见上表与复审报告 §9.4.1）；GPU 加速 ✅ 同日打通（§9.4.2），**CPU 路径保留为无卡环境的依靠**。
 
 ### 10.4 vision 真图验证（B4，已通过）
 
@@ -646,7 +674,7 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 | 项 | 状态 | 证据 |
 |---|---|---|
 | 运行时依赖 | ✅ | ffmpeg/ffprobe 6.0（已在 PATH 生效）、python **3.14.8**（默认）、faster-whisper 1.2.1、av 18.1.0、ctranslate2 4.8.3、onnxruntime 1.31.0、MSVCP140 14.44 |
-| Whisper 模型 | ✅ | tiny/base/small/medium 已预置，`local_files_only=True` **离线可用** |
+| Whisper 模型 | ✅ | tiny/base/small/medium/**large-v3** 已预置（blobs 4.97 GB），`local_files_only=True` **离线可用**；`large-v3` 于 2026-10-16 补上并已实测（0.71× 中文 / 0.41× 英文） |
 | 构建工具链 | ✅ | node v26.8.2、npm 11.19.1、pnpm 12.4.1；`@deepseek-ai/dsh-tools@0.2.0-rc.2` 等**可从 npm 取到**（3.1s，实测），可作 devDependencies 供 `tsc` 类型检查 |
 | profile 服务齐备性 | ✅ | `dsh --profile web --dump-config` 实测已挂载：`@deepseek-ai/dsh-tools`（id `tools`）、`dsh-llm`、`dsh-attachment-local`（id `attachment-local`）、`dsh-subprocess-local`（id `subprocess`）、`dsh-jobs-local`（id `jobs`）、`dsh-tool-call-timeout-policy`（id `timeout-policy`） |
 | 工具注册 API | ✅ | `interface Context { tools: ToolRuntime }`（`dsh-tools/lib/types/index.d.ts:33-34`）；`ctx.tools.register(definition): () => void`（同文件 `:636`，返回注销器）；`defineTool(options)` 由 `@deepseek-ai/dsh-tools` 导出（`lib/index.js:838`） |
@@ -688,9 +716,9 @@ B2 的答案：本机存在一个**在产**的宿主侧第三方插件范本（`
 | **B3** | ~~长音频 × 工具超时~~ | 设计 | ✅ **已决：走 `jobs` 后台任务**。`ctx.jobs.start(spec)` 起一个 `kind: 'transcribe'` 的后台作业，工具**立即**返回 `jobId`；模型用已挂载的 `job_output`/`job_list`/`job_kill` 读结果。契约见 §5.1，配置见 §7 |
 | **B4** | ~~vision 路由是"过度声明"，本机未实测~~ | 风险（R2b） | ✅ **已实测通过**（2026-10-16）：用 `read_image` 把一张含**随机码**的 PNG 作为**工具结果**投给默认路由 `dsh/coding-standard-local`，模型读出了 `FFEJD9`，与事先写入、从未进入模型上下文的答案完全一致 ⇒ 上游**确实接受并理解**工具结果里的 image 块，那条 `input: [text, image]` 声明有真实能力兜底。详见 §10.4 |
 | **B5** | `maxImagesPerMessage = 20` | 约束 | `maxFrames` 默认取 16 留余量；工具描述里提示模型按需调小 |
-| **B6** | ~~工作区不是 git 仓库~~ | 工程 | ✅ **已解决**：已 `git init`、身份设为维护者、并推送到 `reamerit/dsh-media-understanding`；提交前的署名扫描写入 `AGENTS.md` |
+| **B6** | ~~工作区不是 git 仓库~~ | 工程 | ✅ **已解决**：已 `git init`、身份设为维护者、并推送到 `reamerit/dsh-media-understanding`；提交前的署名扫描与"不自动提交"规则写在**工作区根** `C:\workspace\github\AGENTS.md`（2026-10-16 从本仓库移出，改为统管工作区下所有项目；本仓库不再自带 `AGENTS.md`） |
 | **B7** | 会话回放出图 | 实现细节 | 必须同时实现 `output.presentationMeta` + `presentResult`，只写 `presentResult` 在回放时拿不到 attachment |
-| **B8** | 无 GPU；`large-v3` 未拉取 | 限制 | `large-v3` = OpenAI Whisper 家族最大的 checkpoint（约 **1550M** 参数，v3 起 mel 维度从 80 提到 **128**），转成 CTranslate2 格式后约 **3.1 GB**。本机只预置了 tiny/base/small/medium；`device` 固定 `cpu`。⚠️ **"CPU 上更慢"目前是估算而非实测**（依据：`medium` 实测已是 0.6× 实时，参数多 2 倍的 `large-v3` 只会更慢）。需要精确数字就拉下来实测（约 3.1 GB，HF 通道实测 ~700 MB/min ⇒ 5 分钟内） |
+| **B8** | ~~无 GPU；`large-v3` 未拉取~~ | 限制 | ✅ **已关闭（2026-10-16）**：本机**有 NVIDIA Tesla P40（24 GB，计算能力 6.1）**且已打通 GPU 加速——`large-v3` 拉取并实测（blobs 2.88 GB、暖启动 10.26s、**4.55× 中文 / 7.81× 英文实时**，CPU 上仅 0.71×/0.41×；中文 CER **4.8%** 优于 `small` 的 6.0%）。GPU 与 CPU 输出逐字相同。⚠️ `float16` 在 P40 上被 CT2 拒绝，须靠 `computeType: auto` 落到 `int8_float32`。完整过程与 Windows 上的 Pascal 支持边界（R580 起 Windows INF 已不含 `DEV_1B38`）见 [复审报告 §9.4.2](./coding-plan-review.md#942-gpu-tesla-p40--cuda-实测--2026-10-16)。**CPU 路径保留为无卡环境的依靠** |
 
 ### 11.4 建议的开工顺序
 

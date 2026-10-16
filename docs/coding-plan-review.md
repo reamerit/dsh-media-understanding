@@ -315,7 +315,7 @@ Start-Process "$env:TEMP\vc_redist.x64.exe" -ArgumentList '/install','/quiet','/
 | **Whisper 模型** | `tiny` + `base` + `small` | `%USERPROFILE%\.cache\huggingface\hub`（blobs 共 **672 MB**） | **已验证离线可用**（`local_files_only=True`） |
 | VC++ 运行时 | 14.44.35211.0 | `C:\Windows\System32\msvcp140*.dll` | 见 §4.1 |
 
-**~~未装且不建议装~~（已被 §9 取代）**：`medium` 现**已拉取**（扩容后可行）；`large-v3` 仍未拉取（CPU-only，实测 `medium` 已是 0.6× 实时，故不作默认）；CUDA 路径不可用（**无 GPU**）。
+**~~未装且不建议装~~（已被 §9 取代）**：`medium` 现**已拉取**（扩容后可行）；`large-v3` **也已拉取并实测**（2026-10-16，见 §9.4.1：加权 0.71× 中文 / 0.41× 英文实时，中文 CER 4.8% 优于 `small` 的 6.0%，但不作默认）；CUDA 路径不可用（**无 GPU**）。
 
 ### 4.3 安装通道的坑：只有 PyPI 和 HuggingFace 快
 
@@ -399,9 +399,9 @@ small  cpu/int8: load  2.0s  transcribe  7.7s  lang=en  "I have a dream that one
 
 - **`vad_filter=True` 通过**（即 onnxruntime + Silero VAD 链路可用）。
 - **`local_files_only=True` 三模型全部通过** ⇒ 模型预置有效，首调用不需要联网。
-- `device` 行为：`cpu` ✅ / `auto` ✅（本机 `cuda_device_count==0`，自动落到 CPU）/ `cuda` ❌ `RuntimeError: CUDA failed with error no CUDA-capable device is detected`（干净报错，非崩溃）。
+- `device` 行为：`cpu` ✅ / `auto` ✅ / `cuda` ❌ `RuntimeError: CUDA failed with error no CUDA-capable device is detected`（干净报错，非崩溃）。⚠️ **本条记录于驱动修好之前**（2026-10-16 已修复，见 §9.4.2）；结论的正确读法是：**无可用驱动时 `cuda` 会干净报错、`auto` 安静落 CPU**，因此默认必须是 `auto` 而不是 `cuda`。
 
-**对计划的建议**：`whisper.device` 默认写 **`cpu`** 比 `auto` 更贴合本机（无 GPU），并在 README 写明 `cuda` 需要驱动 + cuBLAS/cuDNN。
+**对计划的建议**：~~`whisper.device` 默认写 **`cpu`** 比 `auto` 更贴合本机（无 GPU）~~ ⇒ ⚠️ **已被 §9.4.2 推翻**：本机有 Tesla P40 且已于 2026-10-16 打通，默认应写 **`auto`**（`cuda → cpu` 自动解析），并在 README 写明 `cuda` 需要驱动 + cuBLAS/cuDNN；无驱动时必须静默落 CPU。
 
 ---
 
@@ -432,7 +432,7 @@ small  cpu/int8: load  2.0s  transcribe  7.7s  lang=en  "I have a dream that one
 |---|---|
 | **Phase 0** | §10 整表按 §3 重写；补 MSVCP140 校验项（§4.1）；补"python 候选解释器必须实测 `import faster_whisper`"（§4.4） |
 | **Phase 1** | peer 版本改 `^0.2.0-rc.2`，去掉 `dsh.compatibility.dshReleases`（§1.1/§1.2）；`media_probe` 校验项改为：`ffmpeg -version`、`ffprobe -print_format json`、**`av` 主版本 < 19**、`ctranslate2`/`onnxruntime` **可构造对象且能跑一次推理**（不能只 `import`——见 §4.1）、`ctx.attachments`/`ctx.subprocess` 实际可调用 |
-| **Phase 2** | worker 启动参数用 `whisper.pythonPath`；**默认模型改 `tiny`**（§4.5）；默认 `device: cpu`（§4.6）；`mkl_malloc`、`0xC0000005` 各自归类为独立错误；探测 `local_files_only=True` 是否可离线（本机为是） |
+| **Phase 2** | worker 启动参数用 `whisper.pythonPath`；**默认模型改 `tiny`**（§4.5）；~~默认 `device: cpu`~~ ⇒ **改 `device: auto` + `computeType: auto`**（§5.1.0、§9.4.2）；`mkl_malloc`、`0xC0000005` 各自归类为独立错误；探测 `local_files_only=True` 是否可离线（本机为是） |
 | **Phase 3** | 门控改 `resolveModelInfo` + `exec.agent.session.requestHeader()?.config`（§1.3）；帧临时目录自己 `mkdtemp`（§1.4c）；`maxFrames` 默认值要 ≤ `imageLimits.maxImagesPerMessage`（实测 20，计划正好卡在边界，建议默认调小到 12~16 留余量）；同时实现 `output.presentationMeta` + `presentResult` 才能回放出图（§1.6） |
 | **Phase 4** | `timeoutMs` 等字段是**顶层**（§1.6）；`SubprocessSpawnSpec` 无 `timeoutMs`，超时自己用 `signal`（§1.4） |
 | **Phase 5** | 测试用例里的 `av` 断言改 `>=19` 才拒绝；README 安装前提改为 §4.2 的实际清单 + `av<19` + VC++ 运行时 + 3.14 |
@@ -534,16 +534,76 @@ py -0p →  -V:3.15   ...\Python315\python.exe
 | `base` | 0.9s | **2.8s** | **4.6×** | 保留 |
 | **`small`** | 2.0s | **7.9s** | **1.7×** | ✅ **默认** |
 | `medium` | 37.5s（含 1.5 GB 下载） | **21.7s** | **0.6×** | ⚠️ 慢于实时，仅按需 |
-| `large-v3` | — | — | — | 未拉取（CPU 上预计更慢） |
+| `large-v3` | — | — | — | ~~未拉取~~ → **已实测，见下方补测** |
 
 **已预置模型**：`tiny` / `base` / `small` / `medium`（HF 缓存 blobs 共 **2.08 GB**），`local_files_only=True` 离线可加载。
+
+#### 9.4.1 `large-v3` 补测（2026-10-16，**已拉取并实测**）
+
+上述表格每个模型只跑过一条 13.0s 音频，模型间的精度差无从比较。为此本轮**五个模型全部重测一遍**，用两条已知原文的 TTS 素材（Windows SAPI：`Huihui` zh-CN / `Zira` en-US，16 kHz 单声道，写盘后经 ffmpeg 处理），协议不变（`cpu / int8 / beam_size=5 / vad_filter=True`），并用量纲无关的**去标点字符错误率**比较精度：
+
+| 模型 | 加载 | zh 24.08s 转写 | 相对实时 | en 8.04s 转写 | 相对实时 | 中文 CER | 英文 WER |
+|---|---|---|---|---|---|---|---|
+| `tiny` | 1.70s | 1.87s | 12.89× | 0.87s | 9.28× | 7.2% | 5.9% |
+| `base` | 1.23s | 2.77s | 8.68× | 1.51s | 5.34× | 8.4% | 5.9% |
+| **`small`** | 2.80s | 7.58s | **3.18×** | 3.88s | 2.07× | 6.0% | 5.9% |
+| `medium` | 6.18s | 21.08s | 1.14× | 11.49s | 0.70× | 6.0% | 5.9% |
+| `large-v3` | **11.02s** | **33.85s** | **0.71×** | **19.84s** | **0.41×** | **4.8%** | 5.9% |
+
+**三点结论**（`large-v3` 的默认值决策由此有实测依据）：
+
+1. **拉取与加载**：首次拉取到加载完成共 **88s**（HF 通道比 §4.3 记录的 ~700 MB/min 快得多），缓存 blobs 实占 **2.88 GB**（与计划估算的 ~3.1 GB 一致）；暖启动加载 **11.02s**，比 `small` 贵 4 倍。
+2. **精度**：`large-v3` 中文 CER **4.8%**，是五个模型里最好的；但相对 `small`（6.0%）只少 1.2 个百分点，而且错的地方**五档一致**——`转录`→`转路`、`抽帧`→`抽真/抽针`（TTS 发音域内难以区分）。英文五档都只剩数字写法差异（`three`→`3`、`eight`→`8`），精度上分不出胜负。
+3. **速度**：`large-v3` 在 8 核 CPU 上是 **0.71×（中文）/ 0.41×（英文）实时**——1 小时录音约需 **1.4 小时**。故 **`small` 仍作默认合理**，`large-v3` 定位为"精度优先、可接受慢于实时"的按需档；B8 的"CPU 上更慢"由估算变为实测。
+
+**素材与脚本**：本次放在仓库外的临时目录 `C:\workspace\github\_scratch\`（`bench.py`、`accuracy.py`，TTS 原文与 5×2 全部结果写在脚本/JSON 里，可直接重跑核对）；该目录是临时产物，核对完即删，未纳入仓库。
+
+#### 9.4.2 GPU（Tesla P40 / CUDA）实测 —— 2026-10-16
+
+**本机其实有卡**：`PCI\VEN_10DE&DEV_1B38`（GP102 = Tesla P40），KVM 直通，`nvidia-smi` 报 **23040 MiB / 驱动 573.76 / compute cap 6.1**。此前"无 GPU"的结论是**误判**，根因不是没有硬件，而是驱动从未真正加载，见下方"卡在哪"。
+
+**GPU 基准**（同一素材与协议，`device=cuda`、`compute_type=int8_float32`、`beam_size=5` + VAD）：
+
+| 模型 | 设备 | zh 24.08s | 相对实时 | en 8.04s | 相对实时 | 加载 |
+|---|---|---|---|---|---|---|
+| `large-v3` | cpu/int8 | 33.85s | 0.71× | 19.84s | 0.41× | 11.02s |
+| **`large-v3`** | **cuda/int8_float32** | **5.30s** | **4.55×** | **1.03s** | **7.81×** | 10.26s |
+| `medium` | cpu/int8 | 21.08s | 1.14× | 11.49s | 0.70× | 6.18s |
+| **`medium`** | **cuda/int8_float32** | **1.92s** | **12.53×** | **0.68s** | **11.83×** | 4.84s |
+| `small` | cpu/int8 | 7.58s | 3.18× | 3.88s | 2.07× | 2.80s |
+| **`small`** | **cuda/int8_float32** | **0.96s** | **25.06×** | **0.36s** | **22.42×** | 2.10s |
+
+**结论**：
+
+1. **加速比 6~8×**（中文：`large-v3` 6.4×、`small` 7.9×、`medium` 11×）。`large-v3` 在 GPU 上是 **4.55× 实时** —— 1 小时录音约 **13 分钟**（CPU 上要 ~85 分钟）。⇒ **有卡时 `large-v3` 从"精度优先的按需档"变成"可作默认的候选"**（是否改默认仍取决于部署机器有没有卡，默认值按 §5.1.0 的 `auto` 解析）。
+2. **GPU 与 CPU 的文本一致**：同一素材上 CPU `int8` 与 GPU `int8_float32` 输出**逐字相同**（含同样的 CT2 已知混字 `转录`→`转路`）。⇒ GPU 不会改变精度结论。
+3. ⚠️ **`float16` 在 P40 上直接报错**（`ValueError: Requested float16 compute type, but the target device or backend do not support efficient float16 computation`）——P40 是 GP102，FP16 吞吐只有 FP32 的 1/64，CT2 直接拒绝。本机实测可用集合：`cuda → {float32, int8, int8_float32}`；`cpu → {float32, int16, int8, int8_float32}`。**这正是 §5.1.0 要求 `computeType: auto` 而不能硬编码 `float16` 的实证**：自动选择应落在 `int8_float32`。
+
+**卡在哪（这轮修复的实际过程，供换机器时复现）**：
+
+| 步骤 | 现象 | 结论 |
+|---|---|---|
+| 1 | 设备存在（`Problem=CM_PROB_NONE`）但 `Service` 为空、无 `nvlddmkm.sys`、`cuInit=100` | 有硬件、有半装的驱动包，但没有可用的内核驱动 |
+| 2 | `DriverStore` 里**已有** P40 的包（`oem8/nv_dispswi` 537.36、`oem6/nv_dispui` 538.33），且 ranked `00CF0001` | 包是齐的，问题在加载 |
+| 3 | `nvlddmkm` 服务 `Start=3`（按需）、`ErrorControl=0`，`ImagePath` 指向 DriverStore 里**存在**的 `nvlddmkm.sys` | ★ **根因之一**：内核驱动从不加载 |
+| 4 | 改为 `Start=0`+`ErrorControl=1` 并 `sc start` → `STATE: 4 RUNNING`，但设备仍无 `DEVPKEY_Device_Service` | 驱动起来了，设备节点却仍未被配置 |
+| 5 | `DevNodeStatus` 含 `0x01000000`（`DN_NEED_RESTART`）；`pnputil /remove-device` + `/scan-devices` 重建节点 | ★ **根因之二**：设备节点是"待重启"的残状态 |
+| 6 | 节点重建后自动绑定 `nvlddmkm`/`oem8.inf`，`DIF_INSTALLDEVICE` 返回 `0xc0000493`（`STATUS_DEVICE_HARDWARE_ERROR`） | ⚠️ 这一步曾是"硬件不响应"的误判来源；**实际是启动过程中的瞬时错误**，节点随后完成启动 |
+| 7 | `cuInit=0` / `cuDeviceGetCount=1` / `Tesla P40` / `compute cap 6.1` / `ctranslate2.get_cuda_device_count()==1` | ✅ 通了 |
+
+**换机器时的排查顺序**：① `sc query nvlddmkm` 与服务的 `Start/ErrorControl`（按需启动 + 半装最容易被忽略）→ ② `DevNodeStatus` 是否含 `DN_NEED_RESTART`，必要时 `pnputil /remove-device` + `/scan-devices` 重建节点 → ③ `cuInit`/`cuDeviceGetCount` 直接问 CUDA 驱动 API（比 `nvidia-smi` 更能区分"驱动没起"与"设备没绑"）→ ④ 最后才怀疑硬件/直通。**本次全程没重启机器**。
+
+⚠️ **Windows 的 Pascal 支持边界（与 Linux 文档不一致，已实测）**：NVIDIA 官方矩阵把 Pascal 6.1 的"Last Driver Support"写成 **R580**，但 **Windows 版 R580 起已不再包含 P40 的 INF**——实测 `616.92`（R615）与 `596.86`（R595）解包后**所有 INF 里都没有 `DEV_1B38`**；本机能用的包是 R573 分支（`537.36`/`538.33`），**`536.25` 也含 `DEV_1B38`**（`nv_dispwi.inf`）。⇒ Windows 上的实际边界早于文档口径，换卡/升级驱动前必须先查 INF 是否含 `DEV_1B38`。
+
+⚠️ **写入的系统改动**（便于回滚）：`HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm` 的 `Start` 由 `3` 改为 `0`、`ErrorControl` 由 `0` 改为 `1`（保证重启后驱动自动加载）；设备节点被 `pnputil /remove-device` 重建过一次（因是即插即用设备，重建是常规且无损的操作）；设了 `whisper.device` 相关的临时**代码**在仓库外，未进仓库。
 
 ### 9.5 由此产生的默认值变更（已同步进计划）
 
 | 配置 | 扩容前建议 | **现在** |
 |---|---|---|
 | `whisper.model` | `tiny`（内存所迫） | **`small`** |
-| `whisper.device` | `cpu` | **`cpu`**（不变——**无 GPU** 是硬事实） |
+| `whisper.device` | `cpu` | **`auto`**（⚠️ 2026-10-16 修正：本机有 Tesla P40 且已打通，`auto` 会解析为 `cuda`；无卡机器自动落 `cpu`，见 §9.4.2） |
+| `whisper.computeType` | `int8` | **`auto`**（⚠️ 2026-10-16 修正：按 device 取可用档——GPU `int8_float32`、CPU `int8`；`float16` 在 P40 上被 CT2 直接拒绝，见 §9.4.2） |
 | `whisper.pythonPath` | 必须显式指向 3.14 | **仍建议显式**，但默认 `python` 已是 3.14 |
 | 内存相关风险（R3e） | 高 | **基本消除**（`mkl_malloc` 仍应作为独立错误类保留） |
 | `frames.maxFrames` | 16 | **16**（不变——约束来自 `imageLimits.maxImagesPerMessage = 20`，与内存无关） |
@@ -555,7 +615,7 @@ py -0p →  -V:3.15   ...\Python315\python.exe
 | D1 | 内存 4 GB，`base`+/长音频可能 `mkl_malloc` | ✅ **已解决**（64 GB） |
 | D2 | `python` 指向 3.15，需 `whisper.pythonPath` | ✅ **已解决**（3.14 已为默认，重启后 DSH 子进程亦为 3.14.8） |
 | D3 | `dsh web` 未重启，PATH 里没有 ffmpeg | ✅ **已解决**（重启后 `Get-Command ffmpeg` 命中） |
-| D5 | 无 GPU，`device: auto` 等于 `cpu` | 未变（仍建议显式 `cpu`） |
+| D5 | 无 GPU，`device: auto` 等于 `cpu` | ⚠️ **前提已被推翻**（2026-10-16，见 §9.4.2）：本机**有** Tesla P40，`auto` 解析为 `cuda`；无卡机器仍自动落 `cpu`，故默认用 `auto` |
 | D4 / D6 / D7 | — | 未变 |
 
 ### 9.7 两项设计决策（2026-10-16）
