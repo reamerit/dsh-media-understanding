@@ -27,6 +27,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "build": "node scripts/build.mjs",
+    "prepare": "node scripts/prepare.mjs",
     "verify": "node scripts/verify.mjs",
     "selftest:resolve": "node scripts/selftest-resolve.mjs",
     "selftest:timestamps": "node scripts/selftest-timestamps.mjs",
