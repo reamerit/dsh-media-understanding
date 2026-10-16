@@ -25,16 +25,16 @@
     "manifestVersion": 1
   },
   "scripts": {
+    "setup": "node scripts/setup-dsh-deps.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "build": "node scripts/build.mjs",
     "prepare": "node scripts/prepare.mjs",
-    "verify": "node scripts/verify.mjs",
-    "selftest:resolve": "node scripts/selftest-resolve.mjs",
-    "selftest:timestamps": "node scripts/selftest-timestamps.mjs",
-    "selftest:device": "node scripts/selftest-device.mjs",
-    "selftest:errors": "node scripts/selftest-errors.mjs",
+    "deploy": "node scripts/deploy.mjs",
+    "check:encoding": "node scripts/check-encoding.mjs",
+    "check:readme": "node scripts/check-readme-parity.mjs",
     "test": "node --test test/",
-    "prepublishOnly": "npm run build && npm run verify && npm test"
+    "verify": "npm run typecheck && npm run check:encoding && npm run check:readme && npm test",
+    "prepublishOnly": "npm run build && npm run verify"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",

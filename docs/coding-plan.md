@@ -34,7 +34,7 @@
 
 > ## ✅ 实施状态（2026-10-16）：Phase 1–5 已完成，本机端到端验证通过
 >
-> 插件已实现并**在真实 DSH 宿主里跑通**（`test/` 60 项全绿）。验收证据：
+> 插件已实现并**在真实 DSH 宿主里跑通**（`test/` **69 项全绿**）。验收证据：
 >
 > | 能力 | 证据 |
 > |---|---|
@@ -89,9 +89,11 @@
 > `render` 明确输出 `status | jobId | model | device | source | reason` 事实行。
 >
 > **交付物**：`src/index.ts`（插件入口 + Config）、`src/tools/{probe,transcribe,frames}.ts`、
-> `src/media/{exec,ffmpeg,whisper,download,input}.ts`、`src/pure/{device,errors,json,resolve-input,timestamps}.ts`、
-> `src/workers/{probe,transcribe}.py`、`test/`（60 项）、`scripts/{setup-dsh-deps,build,deploy,check-encoding}.mjs`。
+> `src/media/{exec,ffmpeg,whisper,download,input}.ts`、`src/pure/{device,errors,json,render,resolve-input,timestamps}.ts`、
+> `src/workers/{probe,transcribe}.py`、`test/`（69 项）、`scripts/{setup-dsh-deps,build,deploy,check-encoding}.mjs`。
 > **未提交**：按工作区 `AGENTS.md` 规则，所有改动停在未提交状态，等维护者决定。
+>
+> **设计与实现的全部偏离见 [复审报告 §10 实施期偏离清单](coding-plan-review.md#10-实施期偏离清单2026-10-16权威口径以实现为准)** —— 那份清单是实现落地后回填的**权威口径**；本计划正文中与它冲突的旧描述已就地加勘误。
 
 ---
 
@@ -253,11 +255,11 @@ const err = handle.collected.stderr?.readFrom(0)   // { text, nextOffset, lossy,
 `pts_time`；原机器 ffmpeg 9.0.2 的记录亦未复现成功），两个必须注意的点：
 
 1. **`-vsync` 不可信**（原机器 ffmpeg 9 已移除，报 `Unrecognized option 'vsync'`；当前 6.0 尚存但已废弃）→ 必须用 **`-fps_mode vfr`**（或 `passthrough`，两者实测都可用）。`-fps_mode` 自 ffmpeg **5.1** 引入，因此该写法在 6.x/7.x/9.x 上通用 —— "按 9.x 写"的说法应改为"按 **5.1+** 写"。
-2. **`select` + `metadata` 串联时，打印出的正是被选中的帧**，与输出文件 **1:1 顺序对应** —— 无需再用帧号/帧率反推。step 只需按顺序把第 i 个 `pts_time` 配给第 i 个 `NNNN.jpg`。
-3. 正则：`/pts_time:([0-9.]+)/`；同时可抓 `lavfi.scene_score=([0-9.]+)` 作为诊断信息。
-4. `metadata=mode=print` 不写文件（默认打印到日志），**无需** `file=-`（某些版本会把它当字面文件名）。
+2. **`select` + 打印器串联时，打印出的正是被选中的帧**，与输出文件 **1:1 顺序对应** —— 无需再用帧号/帧率反推。step 只需按顺序把第 i 个 `pts_time` 配给第 i 个 `NNNN.jpg`。（实现里这条以 `showinfo` 落地，见上方勘误。）
+3. 正则：`/pts_time:([0-9.]+)/`（**必须容忍整数**：ffmpeg 6.0 打印的是 `pts_time:4` 而不是 `4.0`）；同时可抓 `lavfi.scene_score=([0-9.]+)` 作为诊断信息。
+4. ~~`metadata=mode=print` 不写文件（默认打印到日志），**无需** `file=-`~~ —— 该打印器在本机不可用（见上方勘误）；`showinfo` 同样只写日志、不落文件。
 
-实测输出示例（4 个 2 秒色块的合成视频，`gt(scene,0.3)`）：
+~~实测输出示例（4 个 2 秒色块的合成视频，`gt(scene,0.3)`）：~~ ⚠️ **以下为原机器的记录，本机未复现**（本机用 `showinfo` 的输出见上方勘误块）：
 
 ```
 [Parsed_metadata_1 @ ...] frame:0    pts:43008   pts_time:4.2
@@ -620,15 +622,20 @@ source: <原路径或原始链接>
 | `whisper.computeType` | **`auto`（≥2026-10-16 起）** | 用 `ctranslate2.get_supported_compute_types(device)` 取可用档。**本机实测**：`cuda → {float32, int8, int8_float32}`，`cpu → {float32, int16, int8, int8_float32}`；⚠️ **`float16` 在 P40（GP102）上会被直接拒绝**（`ValueError: ... do not support efficient float16 computation`），故 GPU 侧应选 **`int8_float32`**、CPU 侧选 `int8`，**绝不硬编码 `float16`** |
 | `whisper.modelCacheDir` | 系统缓存 | 本机实际：`C:\Users\Administrator\.cache\huggingface\hub`，**已预置 tiny/base/small/medium/large-v3（blobs 共 4.97 GB）** |
 | `whisper.localFilesOnly` | 建议 `false`（模型已预置，可留联网兜底） | 本机实测 `local_files_only=True` 全通，离线环境可置 `true` |
-| `whisper.timeoutMs` | 覆盖下载+长音频 | ⚠️ `SubprocessSpawnSpec` **没有** `timeoutMs`，要自己用 `signal` 实现（这里的 `timeoutMs` 是本插件内部的子进程预算，不是工具超时） |
+| `whisper.timeoutMs` | 省略 = 不设子进程超时 | ⚠️ `SubprocessSpawnSpec` **没有** `timeoutMs`，要自己用 `signal` 实现（这里的 `timeoutMs` 是本插件内部的子进程预算，不是工具超时）。**只约束转录**；下载有独立的 `download.timeoutMs` |
 | `transcribe.jobOutputLimitBytes` | `262144`（256 KiB） | 作业的**模型面**字节上限，同时约束输出读取与完成通知（`JobSpec.outputLimitBytes`，`dsh-jobs/lib/types/types.d.ts:129-134`） |
 | `transcribe.maxSegments` | `5000` | 分段上限；超出即截断并置 `truncated: true`（job ring 有上限，超长转录必须如实标注） |
 | `frames.threshold` | `0.3` | 场景变化灵敏度 |
-| `frames.maxFrames` | **`16`** | 单次抽帧上限。⚠️ 实测 `imageLimits.maxImagesPerMessage` 默认正好是 **20**，卡边界没有余量，故默认留出余量 |
+| `frames.maxFrames` | **`16`** | 单次抽帧上限。⚠️ 实测 `imageLimits.maxImagesPerMessage` 默认正好是 **20**，卡边界没有余量，故默认留出余量；实现里再与部署的该上限**取小值**兜底 |
 | `frames.jpegQuality` | `3` | ffmpeg `-q:v`，数值越小越清晰越大 |
 | `frames.maxWidth` | `1280` | 与 `attachments.imageLimits` 取小值（本机 `maxImageDimension = 8192`、`maxImageBytes = 20 MiB`） |
-| `ffmpeg.path` / `ffprobe.path` | 自动解析 | 本机已装 `%LOCALAPPDATA%\Programs\ffmpeg\bin`（6.0）并已在用户 PATH 中**验证生效**；仍支持覆盖 |
-| `workDir` | ⚠️ **`os.tmpdir()` + `mkdtempSync`**（不存在"受管临时目录"服务） | 中间产物落点，`finally` 清理（spill 文件也由自己清） |
+| `download.ytDlpPath` | 省略 = `python -m yt_dlp` | 平台页面链接必须靠 yt-dlp；未安装时该路径报 `download-tool-missing`（直链不受影响） |
+| `download.timeoutMs` | `30 分钟` | 单个链接的下载预算 |
+| `ffmpeg.path` / `ffprobe.path` | 自动解析 | 本机已装 `%LOCALAPPDATA%\Programs\ffmpeg\bin`（6.0）并已在用户 PATH 中**验证生效**；仍支持覆盖（走 `ctx.subprocess.resolveExecutable`） |
+
+> ⚠️ **实施期修正**：原计划表里有一个 **`workDir` 配置项，但它并不存在**（实现里没有这个键）。
+> 中间产物一律落在 `os.tmpdir()` 下的独立 `mkdtemp` 目录（抽轨 / 抽帧 / 下载各一个），
+> 全部在 `finally` 里清理，spill 文件由插件显式删除。改配置项不会改变这一点。
 
 ---
 
@@ -721,7 +728,7 @@ source: <原路径或原始链接>
 |---|---|
 | `ffprobe` 区分有无音轨 | ✅ 带音轨 → `0:video/h264` / `1:audio/aac`；无音轨 → 只有 `0:video`（降级判据可靠） |
 | `ffmpeg` 抽音轨 → 16k 单声道 WAV | ✅ 8 秒视频产出 256,426 字节 WAV |
-| `select` + `metadata=mode=print` + `-fps_mode vfr` 取时间戳 | ✅ 解析出 `pts_time:4` / `:6`，与 `f_0001.jpg`/`f_0002.jpg` **1:1 顺序对应**；首帧不产出（与原文一致） |
+| ~~`select` + `metadata=mode=print` + `-fps_mode vfr` 取时间戳~~ | ❌ **结论有误，已推翻**：本机 ffmpeg 6.0 上 `metadata=mode=print` 不输出 `pts_time`（见 C4a 勘误）。**改用 `showinfo` 后实测两种策略都拿到 `exact`**；`-fps_mode vfr` 与"首帧不产出"两条结论仍然成立 |
 | 纯色视频 → 无场景变化 | ✅ **0 文件、exit=0**（非报错） |
 | `strategy=fps` + `scale='min(1280,iw)':-2` | ✅ 正常出帧，尺寸不受损 |
 | 中文 + 空格文件名 | ✅ argv 传参正常 |

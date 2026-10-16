@@ -193,7 +193,31 @@ execute, presentCall, presentResult, isConcurrencySafe, timeoutMs, projectConten
 | `ffprobe -print_format json -show_streams` | ✅ `0:video/h264, 1:audio/aac`，`duration=8.000000` |
 | 无音轨视频判据 | ✅ 去掉音轨后仅 `0:video`，"无音轨"可判定 |
 | 抽音轨 → 16k 单声道 WAV | ✅ 8s → 256,426 字节 WAV |
-| `select='gt(scene,0.3)',metadata=mode=print` + `-fps_mode vfr` | ✅ 解析出 `pts_time:4` / `:6`，与 `f_0001.jpg`/`f_0002.jpg` **1:1 顺序对应** |
+| ~~`select='gt(scene,0.3)',metadata=mode=print` + `-fps_mode vfr`~~ | ❌ **本结论有误，已在实施期推翻**（见下方勘误） |
+
+> ## ★★ 勘误（2026-10-16，实施期实测）★★
+>
+> 上表那一行写的是"✅ 解析出 `pts_time:4` / `:6`"。**这条验证结论站不住**：在**本机 ffmpeg 6.0**
+> 上复现时，`metadata=mode=print` **根本不打印 `pts_time`**（只有普通的 `Metadata:` 行）。
+> 实施按它对时间戳编程，结果是**所有时间戳静默退化成按帧率估算**——而且没有任何报错，
+> 属于"看着能用其实是错的"那类缺陷：`fps` 采样下估算值碰巧正确，`scene` 采样下则完全对不上。
+>
+> **正确做法是用 `showinfo`**，它对每个被输出的帧打一行含 `pts_time`：
+>
+> ```
+> [Parsed_showinfo_1 @ …] n:   0 pts:      0 pts_time:0 duration: 1 duration_time:1 …
+> [Parsed_showinfo_1 @ …] n:   1 pts:      1 pts_time:1 duration: 1 duration_time:1 …
+> ```
+>
+> 行序与输出文件严格 1:1，因此"顺序对应"这条判断**仍然成立**，只是打印器换了。
+> 实测两种策略都拿到 `timestampSource: exact`（场景采样落在 4.0s/6.0s，与 §10.5 的历史记录一致）。
+> 实现：`src/pure/timestamps.ts`（优先解析 showinfo 行、裸 `pts_time` 兜底、并记 `parsedFrom`）、
+> `src/media/ffmpeg.ts`（命令构造）；回归测试：`test/timestamps.test.mjs`。
+>
+> ⚠️ **另一条相关教训**：本表把"在 shell 里手跑一条命令成功"当成了"插件里也必然成功"。
+> 实际上插件的路径拼接、子进程 stdio、JSON 无损性都各自出过问题
+> （见 §10 的 D3/D12）。**凡是被当作契约写进代码的结论，都必须在宿主里端到端复验过。**
+
 | `-fps_mode vfr` 单独使用（不带 `-vsync`） | ✅ 同样正确 |
 | 首帧不出帧（`select` 对首帧恒假，t=2.0s 的切换漏掉） | ✅ 复现，计划 §C4a 注释正确 |
 | 纯色视频 → 无场景变化 | ✅ **0 个文件，exit=0**（不是报错），可据此返回 `no-scene-change` |
@@ -419,7 +443,7 @@ small  cpu/int8: load  2.0s  transcribe  7.7s  lang=en  "I have a dream that one
 | C2：工具结果**可以**带 image 块 | ✅ TRUE | pi-ai 对 role `'tool'` 豁免（`lib/index.js:1185`）；DeepSeek `lib/index.js:1416` 限定 user/tool |
 | C3：应走 `ctx.subprocess` 而非裸 `child_process.spawn` | ✅ TRUE（细节见 §1.4） | `dsh-subprocess/lib/types/index.d.ts:88,102`；`types.d.ts:69-99` |
 | C4：faster-whisper **没有** `python -m faster_whisper` CLI，必须自带 worker | ✅ TRUE | 装包后实测：入口只有 Python API（`WhisperModel`）；`faster_whisper/` 下无 `__main__.py` |
-| C4：`-vsync` 不可信、`metadata=mode=print` 取时间戳、与输出文件 1:1 | ✅ TRUE（ffmpeg 6.0 复现） | §2.2 实测表 |
+| C4：`-vsync` 不可信、**时间戳与输出文件 1:1**、正则要能吃整数 | ✅ TRUE（ffmpeg 6.0 复现）—— 但**打印器必须用 `showinfo`**，原写的 `metadata=mode=print` 不输出 `pts_time`（见 §2 勘误与 §10 D1） | §2.2 实测表 |
 | §5：`parameterSchemaSpecToJsonSchema` / `valueSchemaSpecToJsonSchema` 存在且由 `defineTool` 调用 | ✅ TRUE | `dsh-tools/lib/types/schema.d.ts:157,163`；`lib/index.js:792,802,848-849` |
 | §5：spec DSL 下 `object` 节点必须显式 `additionalProperties` | ✅ TRUE（仅 spec DSL，且有例外） | `ObjectValueSchemaSpec` 要求 `additionalProperties: boolean`（`schema.d.ts:58-62`），编译器校验 `authorError`（`lib/index.js:699`）。⚠️ **`parameters` 根节点是隐式开放对象（`schema.d.ts:161`），不要在那里加**；手写 JSON Schema 注册时该项是可选的（`json-schema.d.ts:33-34`） |
 | §7：用 `@deepseek-ai/schemastery` 定义 `Config` | ✅ TRUE | 本机 `3.18.4`；写法见 `dsh-tool-fs/lib/index.js:1181-1186,1212`（`export { Config, apply, inject, name }`） |
@@ -627,3 +651,33 @@ py -0p →  -V:3.15   ...\Python315\python.exe
 | 宿主侧范本 | **已找到**：`C:\workspace\github\dsh-mcp-skill-panel` ⇒ B2 关闭。其**打包 `external` 铁律**纠正了一条会真出事的地方：把 `@deepseek-ai/*` 内联进 bundle 会得到第二份模块副本 → 重复 Symbol → 工具调度崩溃 | 计划 §3.1、§11.3 B2 |
 
 > 这两项都已闭环，不再是开工前的待决项；§9.6 的 D4/D6/D7 也不构成阻断（见计划 §11.3）。
+
+---
+
+## 10. 实施期偏离清单（2026-10-16，**权威口径：以实现为准**）
+
+插件已实现并端到端验证（`test/` 69 项全绿）。下面是**设计与实现的全部不一致**——
+凡与此表冲突的旧描述，一律以本节与代码为准。计划文档中对应段落已就地加了勘误。
+
+| # | 原设计 | **实现（权威）** | 为什么改 |
+|---|---|---|---|
+| D1 ★ | 抽帧时间戳用 `metadata=mode=print`（且标为"实测已通过"） | **用 `showinfo`**；解析优先匹配 `n: <i> pts: … pts_time:<s>`，裸 `pts_time` 兜底，并记录 `parsedFrom` | 本机 ffmpeg 6.0 实测 `metadata=mode=print` **不输出 `pts_time`** ⇒ 时间戳全部静默退化为按帧率估算。原"实测通过"的结论无法复现 |
+| D2 | `transcribe_audio` 输出 `status: 'running'`（恒为 running） | **`status: 'running' \| 'not-started'`**；`not-started` 时 `jobId` 为空串，并带 `reason` | 前置判定（无音轨/不支持的 scheme）时不起作业，原契约自相矛盾（`running` 配空 `jobId`），渲染成 `job  (…)` |
+| D3 | 工具返回值未规定 JSON 无损 | **返回值边界一律 `pruneUndefined`**（`src/pure/json.ts`） | 宿主校验器遇任何 `undefined` 属性整体判 `invalid output "value is not lossless JSON"`，且**不报字段名**；而对象展开不会省掉键 |
+| D4 | 帧条目含 `attachmentId`/`path`/`width`/`height` | **额外含 `mediaType`/`bytes`**；并含 `durationSec` 与 `note` | 回放（会话重放）时 `render` 拿不到文件，需靠这些字段重建 `ImageAttachmentRef` |
+| D5 | 配置项含 `workDir` | **不存在该配置项**；临时目录固定为 `os.tmpdir()` 下的独立 `mkdtemp` | 原表列了一个从未实现的键 |
+| D6 | `whisper.timeoutMs` "覆盖下载+长音频" | `whisper.timeoutMs` **只管转录**；下载有独立的 `download.timeoutMs` | 两条路径是不同子进程，预算应当分开 |
+| D7 | `video_frames` 同步抽帧，"中等（分钟级）" | 一致，实取 **600s**；`transcribe_audio` 取 **120s**（只做前置校验+起作业）；`media_probe` **180s** | 计划要求"按工具性质设定并在 README 写明依据"，已写入 README |
+| D8 | 取消的行为未规定 | 取消终态必须是 **`killed`**（不是 `failed`），reason 进终态；`exec.signal` 与 `job_kill` 共用同一 `AbortController` | 原实现下"我按了取消"与"它真炸了"在 `job_list` 里无法区分，用户不知道该不该重试 |
+| D9 | 输入只支持本地文件（原计划明确"不支持远程 URL"） | **支持 http(s)**：直链走 ffmpeg、平台页面走 yt-dlp；不支持的 scheme 明确拒绝 | 用户后续提出的需求（见计划 §11.2 新增需求段） |
+| D10 | 无 `render` 层的测试 | `output.render` 抽到 `src/pure/render.ts` 并加 8 项回归测试 | render 是**模型唯一能看到的一面**，D2 与"取消提醒"两个缺陷都出在这里，原先完全没测到 |
+| D11 | 错误矩阵中"死链"未分类 | 死链/404 归 **`download-failed`**（含 `HTTP error 4xx`、`Server returned 4xx` 等实测形态） | 原分类器只认 yt-dlp 的措辞，ffmpeg 拉死链会落 "unrecognised reason" |
+| D12 | worker 路径约定未写明 | **唯一约定**：`workersDir()` 返回 workers 目录本身，调用方只拼文件名；并加"脚本不存在即报错"断言 | 两处各拼一次 `workers` ⇒ 路径不存在 ⇒ 探针静默失败、伪装成"这台机器没装依赖" |
+
+**两条可复用的教训**（比单个 bug 更值钱）：
+
+1. **"shell 里手跑成功"≠"插件里成功"**：D1、D12 都是命令/路径在 shell 里看着没问题，
+   在宿主里才暴露。凡是要写进代码的契约，必须在真实宿主里端到端复验。
+2. **静默降级比报错危险**：D1（时间戳退化为估算）与 D12（探针空结果 ⇒ 落 CPU）
+   都不报错、都"看起来在正常工作"。**降级必须有痕迹**（`timestampSource`、`reason`、
+   `parsedFrom`），**路径错误必须报错而不能降级**。

@@ -55,6 +55,7 @@
 | Python | **3.14**（本机 3.14.8） | ⚠️ 3.15 无 `ctranslate2`/`onnxruntime` wheel，装不上 faster-whisper |
 | faster-whisper | `1.2.1` | 本地转录引擎 |
 | PyAV | **`av<19`**（本机 18.1.0） | ⚠️ 硬前提：`av>=19` 移除了 `av.open()` 的 `metadata_errors` 参数，而 faster-whisper 1.2.1 仍在传它 → 推理必崩 `TypeError: open() got an unexpected keyword argument 'metadata_errors'` |
+| yt-dlp | 2026.08.19（本机实测） | **仅平台页面链接需要**（YouTube / Bilibili 等）；直链与本地文件不需要。未安装时该路径报 `download-tool-missing`，不影响其余功能 |
 | VC++ 运行时 | 2015-2022 可再发行组件（`MSVCP140.dll` ≥ 14.40） | ⚠️ 过旧版本会导致 `ctranslate2`/`onnxruntime` **`0xC0000005` 硬崩溃：无 traceback、无输出**，表现为「python 子进程莫名消失」 |
 | 硬件 | **CPU 必需**，GPU 可选；内存 ≥ 8 GB 建议 | 没有 NVIDIA 卡/驱动时自动用 CPU（`device: auto` → `cpu`）——**无卡环境是一等公民，不是降级特例**。本机 8 核 / 64 GB / NVIDIA Tesla P40 24 GB（KVM 直通） |
 | GPU（可选加速） | NVIDIA 卡 + 能用的数据中心驱动；**计算能力 ≥ 6.1 需落在 R580 分支内** | ⚠️ Pascal（6.0/6.1）的 CUDA Toolkit 支持**止于 12.x**、驱动分支**止于 R580**（[NVIDIA 官方矩阵](https://docs.nvidia.com/datacenter/tesla/drivers/latest/cuda-toolkit-driver-and-architecture-matrix.html)）。本机 `ctranslate2 4.8.3`（CUDA 12 + cuDNN 9）正好可用；⚠️ 但 **Windows 版的 R580 数据中心驱动已不含 P40 的 INF**，Windows 上实际只能停在更早的分支（现场结论见 [`docs/coding-plan-review.md`](docs/coding-plan-review.md) §9.4.2） |
@@ -125,12 +126,15 @@ Whisper 模型规格与实测速度（`beam_size=5` + VAD）。中文素材 24.0
 ## 📦 安装
 
 1. **装本机前提**（见上表）：ffmpeg、Python 3.14、`pip install "faster-whisper==1.2.1" "av<19" yt-dlp`、VC++ 2015-2022 运行时。
-2. **构建**：
+2. **构建**（从 git 源安装时不用手敲这几条：包自带 `prepare` 钩子，pnpm/npm 装依赖时会自动用 tsdown 打出 `lib/index.js`；下面这条链路是本地开发与发布用的）：
 
        npm install          # typescript + tsdown
        node scripts/setup-dsh-deps.mjs   # 把宿主闭包 junction 进 node_modules（供类型解析）
        npm run build        # tsdown 打包 + tsc 出 lib/types
        npm test             # 69 项契约与回归测试
+
+   注：安装期由 `scripts/prepare.mjs` 构建，入口 `lib/index.js` 是硬指标（缺了安装即失败）；
+   类型声明 `lib/types/` 是尽力而为——没有宿主闭包的机器上会跳过，不影响插件运行。
 
 3. **部署到仓库树外**（重要：仓库内的 `node_modules/@deepseek-ai` 是**开发副本**，若让插件从仓库里被解析，
    会与宿主成为两份模块实例 → 工具调度崩溃）：

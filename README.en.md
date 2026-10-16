@@ -54,6 +54,7 @@ Every dependency is deliberately local: `ffmpeg` for audio extraction and frame 
 | Python | **3.14** (3.14.8 verified) | ⚠️ 3.15 has no `ctranslate2`/`onnxruntime` wheels, so faster-whisper cannot be installed |
 | faster-whisper | `1.2.1` | Local transcription engine |
 | PyAV | **`av<19`** (18.1.0 verified) | ⚠️ Hard requirement: `av>=19` removed the `metadata_errors` argument from `av.open()`, which faster-whisper 1.2.1 still passes → inference always crashes with `TypeError: open() got an unexpected keyword argument 'metadata_errors'` |
+| yt-dlp | 2026.08.19 (verified here) | Needed **only for platform page links** (YouTube / Bilibili, etc.); direct links and local files do not need it. Without it that path reports `download-tool-missing` and nothing else is affected |
 | VC++ runtime | 2015-2022 redistributable (`MSVCP140.dll` ≥ 14.40) | ⚠️ An older DLL makes `ctranslate2`/`onnxruntime` **crash hard with `0xC0000005`: no traceback, no output** — the symptom is "the python subprocess silently vanished" |
 | Hardware | **CPU required, GPU optional**; ≥ 8 GB RAM recommended | With no NVIDIA card/driver it silently uses CPU (`device: auto` → `cpu`) — **a GPU-less machine is a first-class citizen, not a degraded special case**. Verified here: 8 cores / 64 GB / NVIDIA Tesla P40 24 GB (KVM passthrough) |
 | DSH | runtime **≥ `0.2.0-rc.2`** | Compatibility is decided solely by peerDependencies vs. the runtime version; a mismatch is rejected as `incompatible-version` |
@@ -124,12 +125,16 @@ The probe is not "device visible means usable": it actually **constructs a nativ
 ## 📦 Install
 
 1. **Install the native prerequisites** (table above): ffmpeg, Python 3.14, `pip install "faster-whisper==1.2.1" "av<19" yt-dlp`, and the VC++ 2015-2022 redistributable.
-2. **Build**:
+2. **Build** (not needed by hand when installing from the git source: the package ships a `prepare` hook, so pnpm/npm run tsdown and produce `lib/index.js` during install; the chain below is the local development and publish path):
 
        npm install                        # typescript + tsdown
        node scripts/setup-dsh-deps.mjs    # junction the host closure into node_modules (for type resolution)
        npm run build                      # tsdown bundle + tsc declarations
        npm test                           # 69 contract & regression tests
+
+   Note: install-time building is `scripts/prepare.mjs`. The entry `lib/index.js` is a hard
+   requirement (the install fails without it); the `lib/types/` declarations are best-effort —
+   a machine with no host closure skips them, which does not affect the plugin at runtime.
 
 3. **Deploy outside the repository tree** (important: the repo's own `node_modules/@deepseek-ai` is a *development* copy; if the plugin resolves from the repo it becomes a second instance of the host modules and tool dispatch breaks):
 
